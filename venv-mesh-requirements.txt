@@ -1,0 +1,7 @@
+numpy==2.5.1
+packaging==26.2
+pillow==12.3.0
+pyglet==1.5.31
+scipy==1.18.0
+trimesh==4.12.2
+wheel==0.47.0

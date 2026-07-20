@@ -1,0 +1,55 @@
+.TH MESH-PREVIEW 1 "2026-07-20" "3dlib" "User Commands"
+.SH NAME
+mesh-preview \- render STL/STEP/mesh files to PNG thumbnails
+.SH SYNOPSIS
+.B mesh-preview
+.I INPUT
+.RI [ OUTPUT.png ]
+.RB [ \-\-size
+.IR N ]
+.RB [ \-\-backend
+.IR auto|trimesh|simple|freecad ]
+.SH DESCRIPTION
+Generate a PNG preview of a 3D mesh or CAD file for catalog thumbnails.
+.P
+Uses a dedicated Python venv
+.RB ( /usr/local/3dlib/venv-mesh )
+with
+.B pyglet
+1.x because system
+.B trimesh
+cannot call
+.B save_image
+with
+.B pyglet
+2.
+.P
+.B STEP/STP
+files are tessellated with FreeCAD when available, then rendered as a mesh.
+.SH OPTIONS
+.TP
+.B \-\-size N
+Output size in pixels (default 512).
+.TP
+.B \-\-backend NAME
+.BR auto ,
+.BR trimesh
+(shaded),
+.BR simple
+(edge preview, no OpenGL), or
+.BR freecad .
+.SH EXAMPLES
+.nf
+mesh-preview model.stl /tmp/model.png
+mesh-preview part.step /tmp/part.png --size 768
+mesh-preview model.stl --backend simple
+.fi
+.SH SEE ALSO
+.BR 3dlib (1),
+.BR freecad (1).
+.SH FILES
+.I /usr/local/3dlib/bin/mesh-preview
+.br
+.I /usr/local/3dlib/venv-mesh/
+.SH AUTHOR
+Part of the 3dlib project.

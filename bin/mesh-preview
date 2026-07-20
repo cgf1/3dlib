@@ -1,0 +1,299 @@
+#!/usr/bin/env python3
+"""Render STL/OBJ/PLY/3MF/STEP/STP to a PNG thumbnail.
+
+Uses a dedicated venv under /usr/local/3dlib/venv-mesh with pyglet 1.x
+(required by trimesh.scene.save_image — system pyglet 2 is incompatible).
+Falls back to a simple orthographic edge preview if GL rendering fails.
+STEP/STP are tessellated via FreeCAD when available, then rendered as mesh.
+
+Usage:
+  mesh-preview INPUT.stl [OUTPUT.png] [--size 512] [--backend auto|trimesh|simple|freecad]
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+VENV_PY = Path("/usr/local/3dlib/venv-mesh/bin/python")
+SELF = Path(__file__).resolve()
+
+
+def _in_mesh_venv() -> bool:
+    # venv's bin/python often resolves to the same system interpreter path,
+    # so compare sys.prefix rather than sys.executable.
+    return Path(sys.prefix).resolve() == Path("/usr/local/3dlib/venv-mesh").resolve()
+
+
+def main(argv: list[str] | None = None) -> int:
+    # Re-exec under the mesh venv so system pyglet 2 is not used.
+    if VENV_PY.is_file() and not _in_mesh_venv():
+        os.execv(
+            str(VENV_PY),
+            [str(VENV_PY), str(SELF), *(argv if argv is not None else sys.argv[1:])],
+        )
+
+    p = argparse.ArgumentParser(description="Render mesh/CAD file to PNG preview")
+    p.add_argument("input", type=Path, help="Input mesh/CAD file")
+    p.add_argument(
+        "output",
+        type=Path,
+        nargs="?",
+        help="Output PNG (default: <input>.png alongside input)",
+    )
+    p.add_argument("--size", type=int, default=512, help="Image size in pixels (default 512)")
+    p.add_argument(
+        "--backend",
+        choices=("auto", "trimesh", "simple", "freecad"),
+        default="auto",
+        help="Render backend (default: auto)",
+    )
+    args = p.parse_args(argv)
+
+    inp = args.input.expanduser().resolve()
+    if not inp.is_file():
+        print(f"error: not a file: {inp}", file=sys.stderr)
+        return 1
+
+    out = (args.output.expanduser().resolve() if args.output else inp.with_suffix(".png"))
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    ext = inp.suffix.lower()
+    size = max(64, min(args.size, 4096))
+
+    backends = _select_backends(ext, args.backend)
+    last_err: BaseException | None = None
+    for name in backends:
+        try:
+            if name == "freecad":
+                _render_freecad(inp, out, size)
+            elif name == "trimesh":
+                _render_trimesh(inp, out, size)
+            elif name == "simple":
+                _render_simple(inp, out, size)
+            else:
+                continue
+            if out.is_file() and out.stat().st_size > 32:
+                print(f"ok [{name}] {out} ({out.stat().st_size} bytes)")
+                return 0
+            raise RuntimeError(f"{name} produced no output")
+        except BaseException as e:
+            last_err = e
+            print(f"backend {name} failed: {e}", file=sys.stderr)
+
+    print(f"error: all backends failed for {inp}", file=sys.stderr)
+    if last_err:
+        print(f"last error: {last_err}", file=sys.stderr)
+    return 2
+
+
+def _select_backends(ext: str, requested: str) -> list[str]:
+    if requested != "auto":
+        return [requested]
+    cad = ext in {".step", ".stp", ".fcstd", ".iges", ".igs"}
+    if cad:
+        return ["freecad", "trimesh", "simple"]
+    return ["trimesh", "simple", "freecad"]
+
+
+def _as_scene(loaded):
+    import trimesh
+
+    if isinstance(loaded, trimesh.Scene):
+        return loaded
+    if isinstance(loaded, trimesh.Trimesh):
+        return trimesh.Scene(loaded)
+    if isinstance(loaded, (list, tuple)):
+        meshes = [g for g in loaded if isinstance(g, trimesh.Trimesh)]
+        if meshes:
+            return trimesh.Scene(meshes)
+    mesh = loaded
+    if hasattr(mesh, "dump"):
+        try:
+            mesh = trimesh.util.concatenate(tuple(mesh.dump()))
+        except Exception:
+            pass
+    if isinstance(mesh, trimesh.Trimesh):
+        return trimesh.Scene(mesh)
+    raise TypeError(f"unsupported load type: {type(loaded)}")
+
+
+def _render_trimesh(inp: Path, out: Path, size: int) -> None:
+    import trimesh
+
+    loaded = trimesh.load(str(inp), force=None)
+    scene = _as_scene(loaded)
+    png = scene.save_image(resolution=(size, size), visible=True)
+    if not png:
+        raise RuntimeError("trimesh save_image returned empty")
+    out.write_bytes(png)
+
+
+def _render_simple(inp: Path, out: Path, size: int) -> None:
+    """Orthographic edge preview with numpy + Pillow (no OpenGL / pyglet)."""
+    import numpy as np
+    import trimesh
+    from PIL import Image, ImageDraw
+
+    loaded = trimesh.load(str(inp), force=None)
+    if isinstance(loaded, trimesh.Scene):
+        geoms = [g for g in loaded.geometry.values() if isinstance(g, trimesh.Trimesh)]
+        if not geoms:
+            raise RuntimeError("scene has no triangle meshes")
+        mesh = trimesh.util.concatenate(geoms)
+    elif isinstance(loaded, trimesh.Trimesh):
+        mesh = loaded
+    else:
+        mesh = trimesh.load(str(inp), force="mesh")
+        if not isinstance(mesh, trimesh.Trimesh):
+            raise TypeError(f"cannot build mesh from {type(mesh)}")
+
+    v = np.asarray(mesh.vertices, dtype=np.float64)
+    if len(v) == 0:
+        raise RuntimeError("empty mesh")
+
+    v = v - v.mean(axis=0)
+    # isometric-ish
+    x = (v[:, 0] - v[:, 1]) * 0.86602540378
+    y = v[:, 2] + (v[:, 0] + v[:, 1]) * 0.25
+
+    pad = 0.08
+    minx, maxx = float(x.min()), float(x.max())
+    miny, maxy = float(y.min()), float(y.max())
+    span = max(maxx - minx, maxy - miny, 1e-9)
+    scale = (size * (1 - 2 * pad)) / span
+    cx = cy = size / 2.0
+    px = (x - (minx + maxx) / 2) * scale + cx
+    py = cy - (y - (miny + maxy) / 2) * scale
+
+    img = Image.new("RGB", (size, size), (244, 246, 249))
+    draw = ImageDraw.Draw(img)
+    for i0, i1 in mesh.edges_unique:
+        draw.line(
+            [(float(px[i0]), float(py[i0])), (float(px[i1]), float(py[i1]))],
+            fill=(37, 99, 235),
+            width=1,
+        )
+    img.save(out, format="PNG")
+
+
+def _render_freecad(inp: Path, out: Path, size: int) -> None:
+    freecad = _find_freecad()
+    if not freecad:
+        raise RuntimeError("FreeCAD not found")
+
+    with tempfile.TemporaryDirectory() as td:
+        td_path = Path(td)
+        tmp_stl = td_path / "out.stl"
+        script_path = td_path / "preview.py"
+        script_path.write_text(
+            f"""
+import sys
+import FreeCAD
+import Import
+import Mesh
+import MeshPart
+
+inp = {str(inp)!r}
+tmp = {str(tmp_stl)!r}
+
+doc = FreeCAD.newDocument("preview")
+loaded = False
+for loader in (Import.insert, Mesh.insert):
+    try:
+        loader(inp, doc.Name)
+        loaded = True
+        break
+    except Exception as e:
+        print("loader failed", loader, e, file=sys.stderr)
+if not loaded:
+    raise SystemExit("FreeCAD could not load " + inp)
+
+doc.recompute()
+for obj in list(doc.Objects):
+    try:
+        if hasattr(obj, "Shape") and not obj.isDerivedFrom("Mesh::Feature"):
+            m = doc.addObject("Mesh::Feature", obj.Name + "_mesh")
+            m.Mesh = MeshPart.meshFromShape(
+                Shape=obj.Shape, LinearDeflection=0.1, AngularDeflection=0.5
+            )
+    except Exception as e:
+        print("tessellate skip", obj.Name, e, file=sys.stderr)
+doc.recompute()
+
+meshes = [o for o in doc.Objects if o.isDerivedFrom("Mesh::Feature")]
+if not meshes:
+    raise SystemExit("no meshes produced")
+base = meshes[0].Mesh.copy()
+for m in meshes[1:]:
+    try:
+        base.addMesh(m.Mesh)
+    except Exception:
+        pass
+base.write(tmp)
+print("ok", tmp)
+"""
+        )
+
+        env = os.environ.copy()
+        env.setdefault("QT_QPA_PLATFORM", "offscreen")
+        # Prefer FreeCADCmd for headless
+        candidates = []
+        if "cmd" in Path(freecad).name.lower():
+            candidates.append([freecad, str(script_path)])
+        else:
+            candidates.append([freecad, "-c", str(script_path)])
+            for alt in ("freecadcmd", "FreeCADCmd", "/usr/bin/freecadcmd"):
+                candidates.append([alt, str(script_path)])
+
+        last = None
+        for cmd in candidates:
+            try:
+                last = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=180,
+                )
+            except FileNotFoundError:
+                continue
+            if tmp_stl.is_file() and tmp_stl.stat().st_size > 0:
+                break
+        else:
+            detail = ""
+            if last is not None:
+                detail = (last.stderr or last.stdout or "")[-800:]
+            raise RuntimeError(f"FreeCAD conversion failed: {detail}")
+
+        try:
+            _render_trimesh(tmp_stl, out, size)
+        except Exception:
+            _render_simple(tmp_stl, out, size)
+
+
+def _find_freecad() -> str | None:
+    for name in (
+        "freecadcmd",
+        "FreeCADCmd",
+        "/usr/bin/freecadcmd",
+        "/usr/local/bin/freecadcmd",
+        "freecad",
+        "FreeCAD",
+        "/usr/local/bin/freecad",
+        "/usr/bin/freecad",
+    ):
+        path = Path(name)
+        if path.is_file() and os.access(path, os.X_OK):
+            return str(path)
+        found = subprocess.run(["which", name], capture_output=True, text=True)
+        if found.returncode == 0 and found.stdout.strip():
+            return found.stdout.strip()
+    return None
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

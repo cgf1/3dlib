@@ -37,4 +37,29 @@ man 3dlib
 3dlib serve
 ```
 
+### Mesh previews (STL / STEP / …)
+
+System `trimesh` + Gentoo `pyglet-2` cannot call `scene.save_image()` (trimesh requires `pyglet<2`). A dedicated venv fixes that:
+
+```text
+/usr/local/3dlib/venv-mesh/          # pyglet 1.5 + trimesh + numpy + pillow + scipy
+/usr/local/3dlib/bin/mesh-preview    # auto re-execs under that venv
+/usr/local/bin/mesh-preview          # symlink
+```
+
+```bash
+mesh-preview model.stl out.png --size 512
+mesh-preview part.step out.png          # FreeCAD tessellate, then render
+mesh-preview model.stl --backend simple # no OpenGL (edge preview)
+```
+
+Backends: `auto` (default), `trimesh` (shaded GL), `simple` (wireframe), `freecad` (CAD → mesh).
+
+Recreate the venv if needed:
+
+```bash
+python3 -m venv /usr/local/3dlib/venv-mesh
+/usr/local/3dlib/venv-mesh/bin/pip install -r /usr/local/3dlib/venv-mesh-requirements.txt
+```
+
 When you change CLI behavior, update `man/3dlib.1` in the same change.
