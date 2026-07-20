@@ -1,0 +1,265 @@
+.TH 3DLIB 1 "2026-07-20" "3dlib" "User Commands"
+.SH NAME
+3dlib \- personal 3D model library manager for /share/3d
+.SH SYNOPSIS
+.B 3dlib
+.I command
+[options] [args...]
+.P
+.B 3dlib
+.IR path | URL | bambustudio://...
+.SH DESCRIPTION
+.B 3dlib
+maintains a catalog of 3D models under
+.B /share/3d
+using SQLite metadata, thumbnails, and optional import/rename of
+.BR .3mf ,
+.BR .stl ,
+.BR .step ,
+.BR .FCStd ,
+and related files.
+.P
+Project directories (unpacked Printables/Thingiverse/etc.\ downloads) live under
+.BR projects/ .
+Loose models are sorted into
+.BR stl/ ,
+.BR 3mf/ ,
+.BR step/ ,
+and
+.BR fcstd/ .
+.P
+The web UI provides a gallery, item detail, STL inspection, and launching
+Bambu Studio.  The same
+.B run
+command is intended as the
+.B bambustudio://
+scheme handler so MakerWorld \(lqOpen in Bambu Studio\(rq can import into the
+library first.
+.P
+Source tree:
+.BR /usr/local/3dlib
+(bin and man page are installed as symlinks into
+.B /usr/local/bin
+and
+.BR /usr/local/share/man ).
+.SH COMMANDS
+.TP
+.B init
+Create library directories, config, and empty database.  Safe to re-run.
+.TP
+.BI import " PATH"
+Import a model file, project directory, or zip into
+.BR /share/3d .
+Default is to
+.B move
+the source.  Directory imports only take 3D-related content; a single non-3D
+file is an error.  Zips are unpacked into
+.BR projects/ .
+Duplicates (content hash or MakerWorld DesignModelId) re-use the existing
+catalog entry.
+.TP
+.BI delete " ID|PATH..."
+.TQ
+.BI rm " ID|PATH..."
+Remove catalog entries.  By default also deletes the model files under
+.B /share/3d
+and the thumbnail.  Refuses to delete paths outside the library root unless
+.B \-\-keep\-files
+is given (catalog-only removal).
+.TP
+.B scan
+Catalog files already present under
+.B /share/3d
+that are not yet in the database.  Also runs encoding repair.
+.TP
+.BI query " TEXT"
+.TQ
+.BI search " TEXT"
+Full-text search over names, descriptions, paths, and source URLs.
+.TP
+.B ls
+List catalog items (newest first).  Filters:
+.BR \-\-type ,
+.BR \-\-kind ,
+.BR \-\-status ,
+.BR \-\-no\-thumb ,
+.BR \-\-no\-source ,
+.BR \-\-limit .
+.TP
+.BI describe " ID|PATH"
+Show full metadata for one catalog item.
+.TP
+.B thumbs
+Extract/generate missing thumbnails from 3MF embeds or project images.
+.TP
+.B stats
+Print counts by kind/type and missing thumb/source tallies.
+.TP
+.BI run " TARGET"
+.TQ
+.BI open " TARGET"
+Resolve
+.I TARGET
+(local path, catalog ID, MakerWorld HTTPS URL, or
+.B bambustudio://
+deep link), optionally import into the library, then open Bambu Studio.
+.TP
+.B serve
+Start the local web UI (default port
+.BR 31353 ).
+.TP
+.B install-handler
+Install a desktop entry and set
+.B 3dlib
+as the default handler for
+.BR x-scheme-handler/bambustudio .
+.TP
+.B repair-encoding
+Fix UTF-8 mojibake in catalog text fields
+.RB ( name ,
+.BR name_orig ,
+etc.).  Safe to re-run; also runs during
+.BR scan .
+.TP
+.B help
+Global help.  Use
+.B 3dlib help
+.I command
+or
+.B 3dlib
+.I command
+.B \-\-help
+for subcommand help.
+.SH OPTIONS
+Common options (see each subcommand's
+.BR \-\-help ):
+.TP
+.B \-h, \-\-help
+Show help for the command and exit without doing work.
+.TP
+.B \-\-dryrun, \-\-dry\-run
+Describe actions only; do not modify files or launch Studio.
+.TP
+.B \-\-move
+Move sources into the library (import default).
+.TP
+.B \-\-copy
+Copy sources; leave originals in place.
+.TP
+.B \-\-clean
+After a successful import, remove the source (with
+.BR \-\-copy )
+or empty leftovers (with directory
+.BR \-\-move ).
+.TP
+.B \-\-keep\-files
+With
+.BR delete ,
+remove only the catalog entry and thumbnail; leave model files on disk.
+.TP
+.B \-\-no\-import
+With
+.BR run ,
+open Studio without importing into the library.
+.P
+Unknown options are rejected and the command does nothing (exit status 2).
+.SH FILES
+.TP
+.I /share/3d
+Library root (models, projects, database, thumbs).
+.TP
+.I /share/3d/.library/library.db
+SQLite catalog.
+.TP
+.I /share/3d/.library/config.json
+Optional configuration (bind address, port, studio path).
+.TP
+.I /share/3d/.library/renames.jsonl
+Rename audit log.
+.TP
+.I /share/3d/.thumbs/
+Cached thumbnails.
+.TP
+.I /share/3d/projects/
+Unpacked multi-file projects.
+.TP
+.I /share/3d/{stl,3mf,step,fcstd,inbox}/
+Orphan / staging model buckets.
+.TP
+.I /usr/local/3dlib
+Git project source (Perl modules, bin, man).
+.TP
+.I /usr/local/bin/3dlib
+Symlink to
+.IR /usr/local/3dlib/bin/3dlib .
+.TP
+.I /usr/local/share/man/man1/3dlib.1
+Symlink to
+.IR /usr/local/3dlib/man/3dlib.1 .
+.TP
+.I ~/.local/share/applications/3dlib-bambu.desktop
+Desktop entry for
+.B bambustudio://
+(after
+.BR install-handler ).
+.SH ENVIRONMENT
+.TP
+.B THREEDLIB_ROOT
+Override library root (default
+.BR /share/3d ).
+.SH EXAMPLES
+.nf
+# Preview importing one file without changing anything
+3dlib import /share/bambu/some-model.3mf --dryrun --copy
+
+# Copy a project into the library
+3dlib import /share/bambu/wallet --copy
+
+# Search and inspect
+3dlib query wallet
+3dlib describe 42
+
+# Delete catalog entry and library files
+3dlib delete 42 --dryrun
+3dlib delete 42
+
+# Catalog only (leave files)
+3dlib delete 42 --keep-files
+
+# Web gallery
+3dlib serve
+# then open http://localhost:31353/
+
+# Open MakerWorld / Studio deep link via the library
+3dlib run 'https://makerworld.com/en/models/USxxxxxxxx'
+3dlib run 'bambustudio://...'
+.fi
+.SH EXIT STATUS
+.TP
+.B 0
+Success (including successful
+.BR \-\-help ).
+.TP
+.B 2
+Unknown command, invalid option, or usage error (no file changes).
+.TP
+.B other
+Runtime failure (import error, missing file, etc.).
+.SH SEE ALSO
+.BR bambu-studio (1)
+(local wrapper),
+.BR unzip (1).
+.P
+Web UI: after
+.BR "3dlib serve" ,
+visit
+.IR http://localhost:31353/ .
+.P
+Project:
+.IR /usr/local/3dlib .
+.SH AUTHOR
+Written for local use with the /share/3d library layout.
+.SH BUGS
+MakerWorld downloads may require authentication; automatic HTTP fetch is
+best-effort.  Chinese filename translation uses a small built-in map plus
+hex stubs for unknown characters.

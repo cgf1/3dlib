@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=3dlib (Bambu Studio via library)
+Comment=Import into /share/3d then open in Bambu Studio
+Exec=/usr/local/bin/3dlib run %U
+Terminal=false
+Type=Application
+MimeType=model/stl;model/3mf;application/vnd.ms-3mfdocument;application/prs.wavefront-obj;application/x-amf;x-scheme-handler/bambustudio;
+Categories=Graphics;3DGraphics;Engineering;
+Keywords=3D;Printing;Slicer;Bambu;MakerWorld
+StartupNotify=false
+NoDisplay=false

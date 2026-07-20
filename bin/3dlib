@@ -1,0 +1,628 @@
+#!/usr/bin/perl
+use v5.40;
+use experimental qw(class refaliasing declared_refs);
+use utf8;
+use FindBin;
+use lib "$FindBin::RealBin/../lib";
+use File::Path qw(make_path);
+use Getopt::Long qw(GetOptionsFromArray);
+
+use LibConfig;
+use DB;
+use Util qw(fmt_time human_size dry_print decode_argv text_for_db);
+use Import;
+use Delete;
+use Meta;
+use Thumbs;
+use Run;
+use Web;
+use Item ();
+
+binmode STDOUT, ':encoding(UTF-8)';
+binmode STDERR, ':encoding(UTF-8)';
+
+# ARGV paths/names arrive as filesystem bytes — decode to real Unicode early
+@ARGV = decode_argv(@ARGV);
+
+# Fail loudly on unknown options; do not pass them through as bare args.
+Getopt::Long::Configure(qw(
+  no_ignore_case
+  bundling
+  no_auto_abbrev
+  no_pass_through
+  no_getopt_compat
+));
+
+my $cmd = shift @ARGV // 'help';
+$cmd = 'help' if $cmd eq '-h' || $cmd eq '--help';
+
+my %cmds = (
+  init              => \&cmd_init,
+  import            => \&cmd_import,
+  delete            => \&cmd_delete,
+  rm                => \&cmd_delete,
+  scan              => \&cmd_scan,
+  query             => \&cmd_query,
+  search            => \&cmd_query,
+  ls                => \&cmd_ls,
+  list              => \&cmd_ls,
+  describe          => \&cmd_describe,
+  thumbs            => \&cmd_thumbs,
+  stats             => \&cmd_stats,
+  run               => \&cmd_run,
+  open              => \&cmd_run,
+  serve             => \&cmd_serve,
+  'install-handler' => \&cmd_install_handler,
+  handler           => \&cmd_install_handler,
+  'repair-encoding' => \&cmd_repair_encoding,
+  help              => \&cmd_help,
+);
+
+if (!$cmds{$cmd}) {
+  # Allow: 3dlib bambustudio://... or 3dlib https://... or 3dlib /path
+  if ($cmd =~ m{^(bambustudio:|https?://|/|\.)}i || -e $cmd) {
+    unshift @ARGV, $cmd;
+    $cmd = 'run';
+  }
+  else {
+    warn "Unknown command: $cmd\n";
+    cmd_help();
+    exit 2;
+  }
+}
+
+$cmds{$cmd}->(@ARGV);
+exit 0;
+
+# ---------------------------------------------------------------------------
+# Option parsing: --help prints usage and exits 0; unknown options abort
+# without running the command.
+# ---------------------------------------------------------------------------
+
+sub parse_opts {
+  my ($usage, $args_ref, @spec) = @_;
+  my $help = 0;
+
+  # Turn Getopt::Long warnings (unknown option: ...) into hard failures
+  my @warnings;
+  local $SIG{__WARN__} = sub {
+    my ($msg) = @_;
+    if ($msg =~ /Unknown option/i) {
+      push @warnings, $msg;
+      return;
+    }
+    warn $msg;
+  };
+
+  my $ok = GetOptionsFromArray($args_ref, 'help|h' => \$help, @spec);
+
+  if ($help) {
+    print $usage;  # usage text already ends with newline
+    exit 0;
+  }
+
+  if (@warnings || !$ok) {
+    for my $w (@warnings) {
+      say STDERR $w;
+    }
+    say STDERR "Error: invalid option(s). Nothing done.";
+    say STDERR $usage;
+    exit 2;
+  }
+
+  # Anything left that looks like an option was not accepted
+  for my $a (@$args_ref) {
+    if ($a =~ /^--\w/ || ($a =~ /^-\w/ && $a ne '-')) {
+      say STDERR "Error: unexpected option '$a'. Nothing done.";
+      say STDERR $usage;
+      exit 2;
+    }
+  }
+
+  return;
+}
+
+
+sub ensure_db {
+  DB::db_connect(LibConfig::db_path());
+  DB::init_schema();
+}
+
+sub cmd_init {
+  my @args = @_;
+  my $usage = <<'USAGE';
+Usage: 3dlib init
+
+  Create /share/3d directory layout, config, and empty SQLite database.
+  Safe to re-run (directories and schema are created if missing).
+
+Options:
+  -h, --help    Show this help
+USAGE
+  parse_opts($usage, \@args);
+  die "Error: unexpected argument(s): @args\n" if @args;
+
+  my $root = LibConfig::library_root();
+  for my $d (
+    $root,
+    "$root/.library",
+    "$root/.thumbs",
+    "$root/projects",
+    "$root/stl",
+    "$root/3mf",
+    "$root/step",
+    "$root/fcstd",
+    "$root/inbox",
+  ) {
+    make_path($d);
+    say "ok $d";
+  }
+  my $cfg = LibConfig::load_config();
+  $cfg->{library_root} = $root;
+  LibConfig::save_config($cfg);
+  ensure_db();
+  say "Database: ", LibConfig::db_path();
+  say "3dlib initialized.";
+}
+
+sub cmd_import {
+  my @args = @_;
+  my ($dryrun, $move, $copy, $clean);
+  my $usage = <<'USAGE';
+Usage: 3dlib import PATH [options]
+
+  Import a model file, project directory, or zip into /share/3d.
+  Default is to MOVE the source into the library.
+
+Options:
+  --dryrun, --dry-run   Describe actions only; do not change files
+  --move                Move into library (default)
+  --copy                Copy into library; leave source in place
+  --clean               After success: remove source (with --copy) or
+                        empty leftover dirs (with --move on directories)
+  -h, --help            Show this help
+
+PATH:
+  Single 3D file (.3mf .stl .step .fcstd ...) or a .zip (auto-unpacked)
+  Directory: only 3D files / project-like subdirs / zips are imported
+USAGE
+  parse_opts(
+    $usage, \@args,
+    'dryrun|dry-run' => \$dryrun,
+    'move!'          => \$move,
+    'copy!'          => \$copy,
+    'clean'          => \$clean,
+  );
+
+  my $path = shift @args
+    // die "Error: PATH required.\nTry: 3dlib import --help\n";
+  die "Error: unexpected argument(s): @args\n" if @args;
+
+  my $do_copy = 0;
+  if (defined $copy && $copy) {
+    $do_copy = 1;
+  }
+  elsif (defined $move && !$move) {
+    $do_copy = 1;
+  }
+
+  ensure_db();
+  my $res = Import::import_path(
+    path   => $path,
+    dryrun => $dryrun ? 1 : 0,
+    copy   => $do_copy,
+    clean  => $clean ? 1 : 0,
+  );
+  _print_results($res);
+}
+
+sub cmd_delete {
+  my @args = @_;
+  my ($dryrun, $keep_files);
+  my $usage = <<'USAGE';
+Usage: 3dlib delete ID|PATH... [options]
+       3dlib rm     ID|PATH... [options]
+
+  Remove one or more items from the catalog.  By default also deletes the
+  corresponding files under /share/3d (and the thumbnail).  Paths outside the
+  library root are refused unless --keep-files is used.
+
+Options:
+  --dryrun, --dry-run   Show what would be removed; change nothing
+  --keep-files          Catalog entry and thumb only; leave model files
+  -h, --help            Show this help
+USAGE
+  parse_opts(
+    $usage, \@args,
+    'dryrun|dry-run' => \$dryrun,
+    'keep-files'     => \$keep_files,
+  );
+  die "Error: ID or PATH required.\nTry: 3dlib delete --help\n" unless @args;
+
+  ensure_db();
+  my $res = Delete::delete_items(
+    targets    => \@args,
+    dryrun     => $dryrun ? 1 : 0,
+    keep_files => $keep_files ? 1 : 0,
+  );
+  say scalar($res->@*), " item(s) processed";
+}
+
+sub cmd_scan {
+  my @args = @_;
+  my ($dryrun, $force);
+  my $usage = <<'USAGE';
+Usage: 3dlib scan [options]
+
+  Re-scan /share/3d and catalog anything not already in the database.
+
+Options:
+  --dryrun, --dry-run   Show what would be cataloged
+  --force               Re-catalog paths already in the database
+  -h, --help            Show this help
+USAGE
+  parse_opts(
+    $usage, \@args,
+    'dryrun|dry-run' => \$dryrun,
+    'force'          => \$force,
+  );
+  die "Error: unexpected argument(s): @args\n" if @args;
+
+  ensure_db();
+  my $res = Import::scan_library(dryrun => $dryrun, force => $force);
+  say "Cataloged ", scalar(@$res), " item(s)";
+  for my $r (@$res) {
+    say "  #$r->{item_id} $r->{kind} $r->{path}";
+  }
+}
+
+sub cmd_query {
+  my @args = @_;
+  my $usage = <<'USAGE';
+Usage: 3dlib query TEXT
+       3dlib search TEXT
+
+  Full-text search of names, descriptions, paths, and source URLs.
+
+Options:
+  -h, --help    Show this help
+USAGE
+  parse_opts($usage, \@args);
+
+  my $q = join ' ', @args;
+  die "Error: search text required.\nTry: 3dlib query --help\n" unless length $q;
+
+  ensure_db();
+  my $items = DB::search($q, 50);
+  _print_items($items);
+}
+
+sub cmd_ls {
+  my @args = @_;
+  my %o;
+  my $usage = <<'USAGE';
+Usage: 3dlib ls [options]
+
+  List catalog items (most recently modified first).
+
+Options:
+  --type T        Filter by type (3mf, stl, step, fcstd, mixed, ...)
+  --kind K        Filter by kind (file, project)
+  --status S      Filter by status (active, unsorted, ...)
+  --no-thumb      Only items missing a thumbnail
+  --no-source     Only items missing a source URL
+  --limit N       Max rows (default 100)
+  -h, --help      Show this help
+USAGE
+  parse_opts(
+    $usage, \@args,
+    'type=s'    => \$o{type},
+    'kind=s'    => \$o{kind},
+    'status=s'  => \$o{status},
+    'no-thumb'  => \$o{no_thumb},
+    'no-source' => \$o{no_source},
+    'limit=i'   => \$o{limit},
+  );
+  die "Error: unexpected argument(s): @args\n" if @args;
+
+  $o{limit} //= 100;
+  ensure_db();
+  my $items = DB::list_items(%o);
+  _print_items($items);
+}
+
+sub cmd_describe {
+  my @args = @_;
+  my $usage = <<'USAGE';
+Usage: 3dlib describe ID|PATH
+
+  Show full catalog details for one item.
+
+Options:
+  -h, --help    Show this help
+USAGE
+  parse_opts($usage, \@args);
+
+  my $id = shift @args
+    // die "Error: ID or PATH required.\nTry: 3dlib describe --help\n";
+  die "Error: unexpected argument(s): @args\n" if @args;
+
+  ensure_db();
+  my $item = Item::load($id) // die "Not found: $id\n";
+  $item->describe_to(*STDOUT);
+}
+
+sub cmd_thumbs {
+  my @args = @_;
+  my ($missing, $verbose);
+  my $usage = <<'USAGE';
+Usage: 3dlib thumbs [options]
+
+  Generate missing thumbnails (3MF embedded previews, project images).
+
+Options:
+  --missing     Only items without a thumb (default behavior)
+  -v, --verbose Print each item
+  -h, --help    Show this help
+USAGE
+  parse_opts(
+    $usage, \@args,
+    'missing'   => \$missing,
+    'verbose|v' => \$verbose,
+  );
+  die "Error: unexpected argument(s): @args\n" if @args;
+
+  ensure_db();
+  my $n = Thumbs::generate_missing(verbose => $verbose);
+  say "Generated $n thumbnail(s)";
+}
+
+sub cmd_stats {
+  my @args = @_;
+  my $usage = <<'USAGE';
+Usage: 3dlib stats
+
+  Print catalog counts by kind/type and missing thumb/source tallies.
+
+Options:
+  -h, --help    Show this help
+USAGE
+  parse_opts($usage, \@args);
+  die "Error: unexpected argument(s): @args\n" if @args;
+
+  ensure_db();
+  my $s = DB::stats();
+  say "total:     $s->{total}";
+  say "no_thumb:  $s->{no_thumb}";
+  say "no_source: $s->{no_source}";
+  say "by kind:";
+  for my $r (@{ $s->{by_kind} }) {
+    say "  $r->{kind}: $r->{c}";
+  }
+  say "by type:";
+  for my $r (@{ $s->{by_type} }) {
+    say "  $r->{type}: $r->{c}";
+  }
+}
+
+sub cmd_run {
+  my @args = @_;
+  my ($dryrun, $no_import);
+  my $usage = <<'USAGE';
+Usage: 3dlib run TARGET [options]
+       3dlib open TARGET [options]
+
+  Resolve TARGET, optionally import into /share/3d, then open in Bambu Studio.
+  Also used as the bambustudio:// URL handler (see install-handler).
+
+TARGET:
+  local path, catalog ID, MakerWorld https URL, or bambustudio:// deep link
+
+Options:
+  --dryrun, --dry-run   Describe only; do not import or launch Studio
+  --no-import           Open without importing into the library
+  -h, --help            Show this help
+USAGE
+  parse_opts(
+    $usage, \@args,
+    'dryrun|dry-run' => \$dryrun,
+    'no-import'      => \$no_import,
+  );
+
+  my $target = shift @args
+    // die "Error: TARGET required.\nTry: 3dlib run --help\n";
+  die "Error: unexpected argument(s): @args\n" if @args;
+
+  ensure_db();
+  Run::run(
+    target    => $target,
+    dryrun    => $dryrun ? 1 : 0,
+    no_import => $no_import ? 1 : 0,
+  );
+}
+
+sub cmd_serve {
+  my @args = @_;
+  my ($port, $bind);
+  my $usage = <<'USAGE';
+Usage: 3dlib serve [options]
+
+  Start the local web UI (gallery, item detail, STL viewer, Open in Studio).
+
+Options:
+  --port N      Port (default 31353)
+  --bind ADDR   Bind address (default 0.0.0.0)
+  -h, --help    Show this help
+USAGE
+  parse_opts(
+    $usage, \@args,
+    'port=i' => \$port,
+    'bind=s' => \$bind,
+  );
+  die "Error: unexpected argument(s): @args\n" if @args;
+
+  ensure_db();
+  Web::serve(port => $port, bind => $bind);
+}
+
+sub cmd_install_handler {
+  my @args = @_;
+  my $usage = <<'USAGE';
+Usage: 3dlib install-handler
+
+  Install a desktop entry and set 3dlib as the default handler for
+  x-scheme-handler/bambustudio (MakerWorld "Open in Bambu Studio").
+
+  Restore the previous handler with:
+    xdg-mime default OrcaSlicer.desktop x-scheme-handler/bambustudio
+
+Options:
+  -h, --help    Show this help
+USAGE
+  parse_opts($usage, \@args);
+  die "Error: unexpected argument(s): @args\n" if @args;
+
+  my $desktop = <<'EOF';
+[Desktop Entry]
+Name=3dlib (Bambu Studio via library)
+Comment=Import into /share/3d then open in Bambu Studio
+Exec=/usr/local/bin/3dlib run %U
+Terminal=false
+Type=Application
+MimeType=model/stl;model/3mf;application/vnd.ms-3mfdocument;application/prs.wavefront-obj;application/x-amf;x-scheme-handler/bambustudio;
+Categories=Graphics;3DGraphics;Engineering;
+Keywords=3D;Printing;Slicer;Bambu;MakerWorld
+StartupNotify=false
+NoDisplay=false
+EOF
+
+  my $dir = $ENV{HOME} . '/.local/share/applications';
+  make_path($dir);
+  my $path = "$dir/3dlib-bambu.desktop";
+  open my $fh, '>', $path or die "Cannot write $path: $!\n";
+  print {$fh} $desktop;
+  close $fh;
+  say "Wrote $path";
+
+  my $ref = '/usr/local/lib/3dlib/3dlib-bambu.desktop';
+  open my $fh2, '>', $ref or warn "Could not write $ref: $!\n";
+  if ($fh2) {
+    print {$fh2} $desktop;
+    close $fh2;
+    say "Wrote $ref";
+  }
+
+  system('update-desktop-database', $dir);
+  my $rc = system('xdg-mime', 'default', '3dlib-bambu.desktop', 'x-scheme-handler/bambustudio');
+  if ($rc == 0) {
+    say "Set default handler for bambustudio:// -> 3dlib";
+  }
+  else {
+    say "Wrote desktop file. To activate:";
+    say "  xdg-mime default 3dlib-bambu.desktop x-scheme-handler/bambustudio";
+  }
+  say "Verify: xdg-mime query default x-scheme-handler/bambustudio";
+  say "Previous handler was often OrcaSlicer.desktop - restore with:";
+  say "  xdg-mime default OrcaSlicer.desktop x-scheme-handler/bambustudio";
+}
+
+
+sub cmd_repair_encoding {
+  my @args = @_;
+  my $usage = <<'USAGE';
+Usage: 3dlib repair-encoding [--dryrun]
+
+  Fix UTF-8 mojibake in catalog text fields (name, name_orig, path,
+  description).  Safe to re-run.  Also runs automatically during scan.
+
+Options:
+  --dryrun, --dry-run   Show fixes only
+  -h, --help            Show this help
+USAGE
+  my $dryrun;
+  parse_opts($usage, \@args, 'dryrun|dry-run' => \$dryrun);
+  die "Error: unexpected argument(s): @args\n" if @args;
+  ensure_db();
+  my $n = Import::repair_catalog_encoding(dryrun => $dryrun ? 1 : 0);
+  say "Repaired $n item(s)";
+}
+
+sub cmd_help {
+  my @args = @_;
+  if (@args == 1 && $args[0] !~ /^-/ && $cmds{ $args[0] }) {
+    $cmds{ $args[0] }->('--help');
+    return;
+  }
+  if (@args) {
+    my $usage = <<'USAGE';
+Usage: 3dlib help [COMMAND]
+       3dlib --help
+
+  Show global help, or help for a subcommand (e.g. 3dlib help import).
+USAGE
+    parse_opts($usage, \@args);
+  }
+
+  print <<'EOF';
+3dlib - personal 3D model library under /share/3d
+
+Usage:
+  3dlib <command> [options]
+
+Commands:
+  init              Create library dirs + empty database
+  import PATH       Import file/dir/zip into /share/3d
+  delete ID|PATH    Remove catalog entry (and files under /share/3d)
+  scan              Catalog files already under /share/3d
+  query TEXT        Full-text search
+  ls                List items
+  describe ID|PATH  Show one item in detail
+  thumbs            Generate missing thumbnails
+  stats             Counts and coverage
+  run TARGET        Import (optional) + open in Bambu Studio
+  serve             Web UI on port 31353
+  install-handler   Register bambustudio:// handler
+  repair-encoding   Fix UTF-8 mojibake in catalog fields
+  help [COMMAND]    This help, or subcommand help
+
+Run "3dlib <command> --help" for details on any command.
+
+Import defaults to MOVE into /share/3d (use --copy to leave source).
+Delete also removes library files unless --keep-files.
+--dryrun only describes actions; unknown options abort without changes.
+
+Web UI: 3dlib serve   -> http://HOST:31353/
+
+Full manual: man 3dlib
+Source: /usr/local/3dlib
+EOF
+}
+
+sub _print_items ($items) {
+  for my $row ($items->@*) {
+    my \%it = $row;
+    printf "#%-5d %-8s %-6s  %s\n  %s\n  mtime %s  %s\n\n",
+      $it{id},
+      $it{kind} // '',
+      $it{type} // '',
+      $it{name} // '',
+      $it{path} // '',
+      fmt_time($it{mtime}),
+      $it{source_url} // '';
+  }
+  say scalar($items->@*), " item(s)";
+}
+
+sub _print_results ($res) {
+  $res = [$res] unless ref $res eq 'ARRAY';
+  for my $row ($res->@*) {
+    my \%r = $row;
+    my $act = $r{action} // '?';
+    my $id  = $r{item_id} // '-';
+    say "[$act] #$id ", ($r{source} // ''), " -> ", ($r{dest} // '');
+    say "        ", $r{reason} if $r{reason};
+  }
+  say scalar($res->@*), " result(s)";
+}
+
+__END__
