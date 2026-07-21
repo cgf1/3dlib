@@ -1,5 +1,6 @@
 package Util;
 use v5.40;
+use utf8;    # so %HAN_MAP Chinese keys are real Unicode, not mis-decoded bytes
 use experimental qw(class refaliasing declared_refs);
 use Exporter qw(import);
 use File::Basename qw(basename dirname fileparse);
@@ -12,7 +13,7 @@ use Time::Local qw(timegm);
 our @EXPORT_OK = qw(
   now_ts slugify sanitize_filename human_size fmt_time
   file_hash file_stat_info ensure_unique_path
-  is_non_ascii has_han look_like_project translate_name
+  is_non_ascii has_han look_like_project translate_name pick_import_basename
   read_text write_text append_log
   path_ext classify_role
   safe_rename_or_move dry_print
@@ -186,37 +187,92 @@ sub has_han ($s) {
   return $s =~ /\p{Han}/;
 }
 
-# Simple Chinese token map for common filenames we saw; unknown Han → pinyin-ish stub
+# Chinese phrases we know; unknown Han is left as UTF-8 (no more zh-<hex> stubs).
 my %HAN_MAP = (
-  '棉签发射器'           => 'cotton-swab-launcher',
-  '鱼缸延长管'           => 'aquarium-extension-tube',
-  '飞环'                 => 'flying-ring',
-  '烟斗1'                => 'pipe-1',
-  '组合体'               => 'assembly',
-  '水妖精'               => 'water-fairy',
-  '恐龙笔筒'             => 'dinosaur-pen-holder',
-  '钻石剑'               => 'diamond-sword',
-  '过滤箱MINI版本'       => 'filter-box-mini',
-  '静音过滤箱打印文件'   => 'silent-filter-box',
+  '棉签发射器'             => 'cotton-swab-launcher',
+  '鱼缸延长管'             => 'aquarium-extension-tube',
+  '飞环'                   => 'flying-ring',
+  '烟斗1'                  => 'pipe-1',
+  '组合体'                 => 'assembly',
+  '水妖精'                 => 'water-fairy',
+  '恐龙笔筒'               => 'dinosaur-pen-holder',
+  '钻石剑'                 => 'diamond-sword',
+  '过滤箱MINI版本'         => 'filter-box-mini',
+  '静音过滤箱打印文件'     => 'silent-filter-box',
   '洗碗池_洗手池下水回形管' => 'sink-p-trap-pipe',
-  '火车笛'               => 'train-whistle',
-  '无限8'                => 'infinity-8',
+  '火车笛'                 => 'train-whistle',
+  '无限8'                  => 'infinity-8',
   '调整参数，提高打印效率' => 'tuned-print-efficiency',
-  '坐立不安'             => 'restless',
-  '单色'                 => 'single-color',
-  '多色'                 => 'multi-color',
+  '坐立不安'               => 'restless',
+  '单色'                   => 'single-color',
+  '多色'                   => 'multi-color',
+  '按压旋转球'             => 'press-rotate-ball',
+  '无需轴承'               => 'no-bearing',
+  '简单组装'               => 'easy-assembly',
+  '两种尺寸'               => 'two-sizes',
+  '篮球机'                 => 'basketball-machine',
 );
 
 sub translate_name {
   my ($name) = @_;
-  return $name unless has_han($name);
+  return $name unless defined $name && has_han($name);
   my ($base, $d, $ext) = fileparse($name, qr/\.[^.]*/);
   for my $k (sort { length($b) <=> length($a) } keys %HAN_MAP) {
     $base =~ s/\Q$k\E/$HAN_MAP{$k}/g;
   }
-  # remaining Han → hex stub
-  $base =~ s/(\p{Han}+)/sprintf('zh-%s', unpack('H*', encode('UTF-8', $1)))/ge;
+  # Keep remaining Han as UTF-8 — readable on Linux; never emit zh-<hex>
   return $base . $ext;
+}
+
+# Pick a library filename from original path / Bambu name= / 3MF title.
+# Prefer a real user filename over a long Chinese marketing Title.
+sub pick_import_basename {
+  my (%o) = @_;
+  my $path  = $o{path} // '';
+  my $ext   = $o{ext} // path_ext($path);
+  my $base  = text_for_db(basename($path));
+  my $bambu = $o{bambu_name};
+  my $title = $o{title};
+
+  $bambu = text_for_db($bambu) if defined $bambu;
+  $title = text_for_db($title) if defined $title;
+
+  my $pick;
+  if (defined $bambu && length $bambu && $bambu !~ /^\s*$/) {
+    $pick = $bambu;
+  }
+  elsif (_basename_is_useful($base)) {
+    # e.g. 5cm_单色.3mf — keep user's name, not a long 3MF Title
+    $pick = $base;
+  }
+  elsif (defined $title && length $title) {
+    $pick = $title;
+  }
+  else {
+    $pick = $base || 'unnamed';
+  }
+
+  $pick = translate_name($pick);
+  $pick = sanitize_filename($pick);
+
+  # Ensure correct extension
+  my ($stem, undef, $fext) = fileparse($pick, qr/\.[^.]*/);
+  if (lc($fext // '') ne ".$ext") {
+    $stem = $pick if !length($stem);
+    $stem =~ s/\.$ext$//i;
+    $pick = sanitize_filename($stem) . ".$ext";
+  }
+  $pick =~ s/\.\Q$ext\E\.\Q$ext\E$/.$ext/i;
+  return $pick;
+}
+
+sub _basename_is_useful {
+  my ($base) = @_;
+  return 0 unless defined $base && length $base;
+  return 0 if $base =~ /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+  return 0 if $base =~ /\.3mf_at=/i;
+  return 0 if $base =~ /^(unnamed|download|model|file|new|untitled)(\.|$)/i;
+  return 1;
 }
 
 sub look_like_project {

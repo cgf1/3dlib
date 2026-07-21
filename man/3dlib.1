@@ -89,8 +89,20 @@ List catalog items (newest first).  Filters:
 .BI describe " ID|PATH"
 Show full metadata for one catalog item.
 .TP
-.B thumbs
-Extract/generate missing thumbnails from 3MF embeds or project images.
+.BI thumbs " [ID|PATH]..."
+Generate thumbnails.  Order: project images, embedded 3MF previews, then
+.B mesh-preview
+for STL/STEP/OBJ/etc.
+With no arguments, rebuilds items whose thumb is
+.B missing
+or
+.B older than the source
+file (mtime).  Pass ids/paths to target specific items.
+.B \-\-force
+rebuilds regardless of mtimes
+.RB ( 3dlib\ thumbs\ 3\ \-\-force ;
+.B \-\-force
+alone rebuilds all).
 .TP
 .B stats
 Print counts by kind/type and missing thumb/source tallies.
@@ -107,6 +119,34 @@ deep link), optionally import into the library, then open Bambu Studio.
 .B serve
 Start the local web UI (default port
 .BR 31353 ).
+.B Ctrl-C
+stops;
+.B Ctrl-\\
+(SIGQUIT) restarts the server and reloads code.
+Optional password protection for LAN family use (do
+.B not
+port-forward to the internet):
+.B THREEDLIB_WEB_PASSWORD
+(or
+.B web.password
+in config) gates browse/download;
+.B THREEDLIB_WEB_ADMIN_PASSWORD
+(or
+.BR web.admin_password )
+is a separate password that can delete items.
+With only the family password set, that login has full access.
+With both set, family login can download but not delete.
+Connections from the same machine (loopback or this host's own
+addresses) are treated as
+.B admin
+by default with no login
+.RB ( local " admin" );
+disable with
+.B THREEDLIB_WEB_LOCAL_ADMIN=0
+or
+.BR web.local_admin=false .
+Gallery supports multi-select download (zip) and bulk delete (admin).
+Item pages have a Download button.
 .TP
 .B install-handler
 Install a desktop entry and set
@@ -120,6 +160,16 @@ Fix UTF-8 mojibake in catalog text fields
 .BR name_orig ,
 etc.).  Safe to re-run; also runs during
 .BR scan .
+.TP
+.BI translate " [ID|PATH]..."
+Translate Chinese catalog descriptions to English via an OpenAI-compatible
+API (ChatGPT or xAI Grok).  Uses
+.B OPENAI_API_KEY
+/
+.B XAI_API_KEY .
+Original text is stored in
+.BR description_orig .
+Also runs automatically on import when enabled (default).
 .TP
 .B help
 Global help.  Use
@@ -226,7 +276,9 @@ Override library root (default
 # Catalog only (leave files)
 3dlib delete 42 --keep-files
 
-# Web gallery
+# Web gallery (LAN only — do not expose to the internet)
+export THREEDLIB_WEB_PASSWORD='family-secret'
+export THREEDLIB_WEB_ADMIN_PASSWORD='admin-secret'   # optional; enables delete
 3dlib serve
 # then open http://localhost:31353/
 

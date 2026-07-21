@@ -47,9 +47,14 @@ class Item {
   }
 
   method describe_to ($fh = *STDOUT) {
+    # Optional: show Chinese/original fields (off by default — catalog is English-facing)
+    my $show_orig = $ENV{THREEDLIB_SHOW_ORIGINAL} ? 1 : 0;
+
     say {$fh} "id:              $id";
     say {$fh} "name:            $name";
-    say {$fh} "name_orig:       ", $name_orig // '';
+    if ($show_orig && defined $name_orig && length $name_orig && $name_orig ne $name) {
+      say {$fh} "name_orig:       ", $name_orig;
+    }
     say {$fh} "kind/type:       $kind / $type";
     say {$fh} "path:            $path";
     say {$fh} "status:          ", $status // '';
@@ -63,6 +68,14 @@ class Item {
     say {$fh} "hash:            ", $content_hash // '';
     say {$fh} "--- description ---";
     say {$fh} $description // '';
+    if ($show_orig) {
+      if (my $row = DB::get_item($id)) {
+        if ($row->{description_orig} && length $row->{description_orig}) {
+          say {$fh} "--- description (original) ---";
+          say {$fh} $row->{description_orig};
+        }
+      }
+    }
     my $files = $self->files;
     if ($files->@*) {
       say {$fh} "--- files ---";

@@ -17,6 +17,7 @@ use Thumbs;
 use Run;
 use Web;
 use Item ();
+use Translate;
 
 binmode STDOUT, ':encoding(UTF-8)';
 binmode STDERR, ':encoding(UTF-8)';
@@ -55,6 +56,7 @@ my %cmds = (
   'install-handler' => \&cmd_install_handler,
   handler           => \&cmd_install_handler,
   'repair-encoding' => \&cmd_repair_encoding,
+  translate         => \&cmd_translate,
   help              => \&cmd_help,
 );
 
@@ -354,27 +356,59 @@ USAGE
 
 sub cmd_thumbs {
   my @args = @_;
-  my ($missing, $verbose);
+  my ($missing, $verbose, $force, $limit);
   my $usage = <<'USAGE';
-Usage: 3dlib thumbs [options]
+Usage: 3dlib thumbs [ID|PATH]... [options]
 
-  Generate missing thumbnails (3MF embedded previews, project images).
+  Generate thumbnails.  Tries in order:
+    1) project images/
+    2) embedded 3MF plate/cover previews
+    3) mesh-preview render (STL, STEP, OBJ, 3MF, …)
+
+  With no IDs: items whose thumb is missing OR older than the source file.
+  With IDs/paths: only those items (still skips if thumb is up-to-date,
+  unless --force).
+
+Examples:
+  3dlib thumbs -v                 # missing + outdated
+  3dlib thumbs 3 --force          # always rebuild #3
+  3dlib thumbs /share/3d/stl/x.stl --force -v
+  3dlib thumbs --force            # rebuild ALL thumbs
 
 Options:
-  --missing     Only items without a thumb (default behavior)
-  -v, --verbose Print each item
-  -h, --help    Show this help
+  --force           Regenerate even if thumb is newer than the source
+  --missing         Legacy alias (default already includes missing/stale)
+  --limit N         Max items when scanning the catalog (default 5000)
+  -v, --verbose     Print each item
+  -h, --help        Show this help
 USAGE
   parse_opts(
     $usage, \@args,
     'missing'   => \$missing,
+    'force'     => \$force,
     'verbose|v' => \$verbose,
+    'limit=i'   => \$limit,
   );
-  die "Error: unexpected argument(s): @args\n" if @args;
 
   ensure_db();
-  my $n = Thumbs::generate_missing(verbose => $verbose);
-  say "Generated $n thumbnail(s)";
+  my @ids;
+  if (@args) {
+    @ids = Thumbs::resolve_targets(@args);
+    # Targeting specific items implies we want them updated;
+    # --force overwrites existing files; without it, skips if present.
+  }
+  elsif ($missing && $force) {
+    # explicit --missing wins over bare --force all
+    $force = 0;
+  }
+
+  my $n = Thumbs::generate_missing(
+    verbose => $verbose,
+    force   => $force ? 1 : 0,
+    limit   => $limit,
+    ids     => @ids ? \@ids : undef,
+  );
+  say(($force ? "Refreshed" : "Generated"), " $n thumbnail(s)");
 }
 
 sub cmd_stats {
@@ -448,6 +482,7 @@ sub cmd_serve {
 Usage: 3dlib serve [options]
 
   Start the local web UI (gallery, item detail, STL viewer, Open in Studio).
+  Ctrl-C stops; Ctrl-\\ (SIGQUIT) restarts and reloads code.
 
 Options:
   --port N      Port (default 31353)
@@ -462,7 +497,11 @@ USAGE
   die "Error: unexpected argument(s): @args\n" if @args;
 
   ensure_db();
-  Web::serve(port => $port, bind => $bind);
+  Web::serve(
+    port   => $port,
+    bind   => $bind,
+    reexec => '/usr/local/bin/3dlib',
+  );
 }
 
 sub cmd_install_handler {
@@ -547,6 +586,57 @@ USAGE
   say "Repaired $n item(s)";
 }
 
+sub cmd_translate {
+  my @args = @_;
+  my ($dryrun, $force, $verbose, $limit);
+  my $usage = <<'USAGE';
+Usage: 3dlib translate [ID|PATH]... [options]
+
+  Translate Chinese (CJK) catalog descriptions to English via an
+  OpenAI-compatible API (OpenAI ChatGPT or xAI Grok).
+
+  Uses OPENAI_API_KEY by default (model gpt-4o-mini).  For Grok:
+    export XAI_API_KEY=...
+    and set in /share/3d/.library/config.json:
+      "translate": { "provider": "xai", "model": "grok-3-mini" }
+
+  With no IDs: translate all items whose description still contains CJK.
+  Original text is kept in description_orig.
+
+Examples:
+  3dlib translate 8 -v
+  3dlib translate --dryrun
+  3dlib translate --force 8
+
+Options:
+  --force           Re-translate even if already done
+  --dryrun          Show what would be translated
+  --limit N         Max items when scanning (default 5000)
+  -v, --verbose     Print each item
+  -h, --help        Show this help
+USAGE
+  parse_opts(
+    $usage, \@args,
+    'force'          => \$force,
+    'dryrun|dry-run' => \$dryrun,
+    'verbose|v'      => \$verbose,
+    'limit=i'        => \$limit,
+  );
+
+  ensure_db();
+  my @ids;
+  @ids = Thumbs::resolve_targets(@args) if @args;
+
+  my $n = Translate::translate_many(
+    force   => $force ? 1 : 0,
+    dryrun  => $dryrun ? 1 : 0,
+    verbose => $verbose ? 1 : 0,
+    limit   => $limit,
+    ids     => @ids ? \@ids : undef,
+  );
+  say(($dryrun ? "Would translate" : "Translated"), " $n item(s)");
+}
+
 sub cmd_help {
   my @args = @_;
   if (@args == 1 && $args[0] !~ /^-/ && $cmds{ $args[0] }) {
@@ -577,12 +667,13 @@ Commands:
   query TEXT        Full-text search
   ls                List items
   describe ID|PATH  Show one item in detail
-  thumbs            Generate missing thumbnails
+  thumbs            Generate missing thumbs (3MF / photos / mesh-preview)
   stats             Counts and coverage
   run TARGET        Import (optional) + open in Bambu Studio
   serve             Web UI on port 31353
   install-handler   Register bambustudio:// handler
   repair-encoding   Fix UTF-8 mojibake in catalog fields
+  translate         Translate CJK descriptions via OpenAI/Grok API
   help [COMMAND]    This help, or subcommand help
 
 Run "3dlib <command> --help" for details on any command.

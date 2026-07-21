@@ -51,6 +51,17 @@ def main(argv: list[str] | None = None) -> int:
         default="auto",
         help="Render backend (default: auto)",
     )
+    p.add_argument(
+        "--show-window",
+        action="store_true",
+        help="Show the OpenGL window while rendering (default: hidden; PNG only)",
+    )
+    p.add_argument(
+        "--pad",
+        type=float,
+        default=0.08,
+        help="Extra margin as a fraction of the frame (0=tight, 0.08=default ~8%% border)",
+    )
     args = p.parse_args(argv)
 
     inp = args.input.expanduser().resolve()
@@ -69,14 +80,19 @@ def main(argv: list[str] | None = None) -> int:
     for name in backends:
         try:
             if name == "freecad":
-                _render_freecad(inp, out, size)
+                _render_freecad(inp, out, size, visible=args.show_window, pad=args.pad)
             elif name == "trimesh":
-                _render_trimesh(inp, out, size)
+                _render_trimesh(inp, out, size, visible=args.show_window, pad=args.pad)
             elif name == "simple":
-                _render_simple(inp, out, size)
+                _render_simple(inp, out, size, margin=max(args.pad, 0.04))
             else:
                 continue
             if out.is_file() and out.stat().st_size > 32:
+                # Trim excess empty border, keep a small uniform margin
+                try:
+                    _autocrop_whitespace(out, margin=max(args.pad, 0.04))
+                except Exception as e:
+                    print(f"autocrop skipped: {e}", file=sys.stderr)
                 print(f"ok [{name}] {out} ({out.stat().st_size} bytes)")
                 return 0
             raise RuntimeError(f"{name} produced no output")
@@ -121,18 +137,100 @@ def _as_scene(loaded):
     raise TypeError(f"unsupported load type: {type(loaded)}")
 
 
-def _render_trimesh(inp: Path, out: Path, size: int) -> None:
+def _autocrop_whitespace(path: Path, margin: float = 0.06) -> None:
+    """Crop near-white margins then re-center on a square with a small border.
+
+    Trimesh camera framing is approximate; this removes leftover empty space
+    without clipping the model.
+    """
+    import numpy as np
+    from PIL import Image
+
+    im = Image.open(path).convert("RGB")
+    arr = np.asarray(im)
+    # Treat near-white as background (trimesh default clear color)
+    mask = (arr < 248).any(axis=2)
+    ys, xs = np.where(mask)
+    if len(xs) < 8:
+        return
+    x0, x1 = int(xs.min()), int(xs.max())
+    y0, y1 = int(ys.min()), int(ys.max())
+    w, h = x1 - x0 + 1, y1 - y0 + 1
+    # Bail if already filling most of the frame
+    fill = (w * h) / float(im.size[0] * im.size[1])
+    if fill > 0.72:
+        return
+
+    side = max(w, h)
+    border = max(2, int(round(side * float(np.clip(margin, 0.0, 0.25)))))
+    side = side + 2 * border
+    canvas = Image.new("RGB", (side, side), (255, 255, 255))
+    crop = im.crop((x0, y0, x1 + 1, y1 + 1))
+    canvas.paste(crop, ((side - w) // 2, (side - h) // 2))
+    canvas = canvas.resize(im.size, Image.Resampling.LANCZOS)
+    canvas.save(path, format="PNG")
+
+
+def _frame_camera(scene, size: int, pad: float = 0.08) -> None:
+    """Frame the model to fill most of the square PNG with a small border.
+
+    pad: extra empty border as a fraction of the image (0.08 ≈ 8% each side).
+    Uses FOV geometry so we don't leave huge whitespace or clip corners.
+    """
+    import numpy as np
+
+    extents = scene.extents
+    if extents is None or np.any(np.isnan(extents)):
+        scene.set_camera(resolution=(size, size))
+        return
+
+    # Silhouette radius from the two largest AABB half-extents (less empty
+    # space than a full 3D bounding sphere for flat/long parts).
+    half = np.sort(np.asarray(extents, dtype=np.float64) * 0.5)[::-1]
+    radius = float(np.sqrt(half[0] ** 2 + half[1] ** 2))
+    if radius < 1e-12:
+        radius = 1.0
+    # Small fudge for 3/4 perspective (corners stick out a bit)
+    radius *= 1.05
+
+    fov_deg = 50.0
+    # Fraction of the FOV the model should occupy (leave pad as empty border)
+    pad = float(np.clip(pad, 0.0, 0.4))
+    fill = max(0.55, 1.0 - 2.0 * pad)  # e.g. pad=0.08 → fill=0.84
+    # distance so projected diameter ≈ fill * frame
+    distance = radius / (np.tan(np.radians(fov_deg) * 0.5) * fill)
+
+    scene.set_camera(
+        angles=np.radians([28.0, 45.0, 0.0]),
+        distance=float(distance),
+        center=scene.centroid,
+        resolution=(size, size),
+        fov=(fov_deg, fov_deg),
+    )
+
+
+def _render_trimesh(
+    inp: Path,
+    out: Path,
+    size: int,
+    *,
+    visible: bool = False,
+    pad: float = 0.08,
+) -> None:
     import trimesh
 
     loaded = trimesh.load(str(inp), force=None)
     scene = _as_scene(loaded)
-    png = scene.save_image(resolution=(size, size), visible=True)
+    _frame_camera(scene, size, pad=pad)
+    # visible=False: PNG only (no flash). Some drivers need a visible window;
+    # pass --show-window if you get a blank image.
+    png = scene.save_image(resolution=(size, size), visible=visible)
     if not png:
         raise RuntimeError("trimesh save_image returned empty")
     out.write_bytes(png)
 
 
-def _render_simple(inp: Path, out: Path, size: int) -> None:
+def _render_simple(inp: Path, out: Path, size: int, margin: float = 0.12) -> None:
     """Orthographic edge preview with numpy + Pillow (no OpenGL / pyglet)."""
     import numpy as np
     import trimesh
@@ -160,11 +258,10 @@ def _render_simple(inp: Path, out: Path, size: int) -> None:
     x = (v[:, 0] - v[:, 1]) * 0.86602540378
     y = v[:, 2] + (v[:, 0] + v[:, 1]) * 0.25
 
-    pad = 0.08
     minx, maxx = float(x.min()), float(x.max())
     miny, maxy = float(y.min()), float(y.max())
     span = max(maxx - minx, maxy - miny, 1e-9)
-    scale = (size * (1 - 2 * pad)) / span
+    scale = (size * (1 - 2 * margin)) / span
     cx = cy = size / 2.0
     px = (x - (minx + maxx) / 2) * scale + cx
     py = cy - (y - (miny + maxy) / 2) * scale
@@ -180,7 +277,14 @@ def _render_simple(inp: Path, out: Path, size: int) -> None:
     img.save(out, format="PNG")
 
 
-def _render_freecad(inp: Path, out: Path, size: int) -> None:
+def _render_freecad(
+    inp: Path,
+    out: Path,
+    size: int,
+    *,
+    visible: bool = False,
+    pad: float = 0.08,
+) -> None:
     freecad = _find_freecad()
     if not freecad:
         raise RuntimeError("FreeCAD not found")
@@ -270,7 +374,7 @@ print("ok", tmp)
             raise RuntimeError(f"FreeCAD conversion failed: {detail}")
 
         try:
-            _render_trimesh(tmp_stl, out, size)
+            _render_trimesh(tmp_stl, out, size, visible=visible, pad=pad)
         except Exception:
             _render_simple(tmp_stl, out, size)
 

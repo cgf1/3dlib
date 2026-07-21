@@ -75,6 +75,13 @@ sub extract_3mf_meta {
     $m{description} = html_to_text(
       $m{meta}{Description} // $m{meta}{ProfileDescription} // ''
     );
+
+    # Public MakerWorld URLs use a numeric id, not DesignModelId (US…).
+    # CDN / HTML embeds: makerworld/model/DSM00000002755057/... → 2755057
+    if ($xml =~ /\b(DSM0*\d+)\b/i) {
+      $m{dsm_id} = $1;
+      $m{numeric_id} = dsm_to_numeric($1);
+    }
   }
 
   # Thumbnail paths inside zip
@@ -90,12 +97,42 @@ sub extract_3mf_meta {
     }
   }
 
-  if ($m{design_model_id}) {
+  if ($m{design_model_id} || $m{numeric_id}) {
     $m{source_site} = 'makerworld';
-    $m{source_url}  = 'https://makerworld.com/en/models/' . $m{design_model_id};
-    $m{source_id}   = $m{design_model_id};
+    $m{source_url}  = makerworld_public_url(
+      numeric_id      => $m{numeric_id},
+      title           => $m{title},
+      design_model_id => $m{design_model_id},
+    );
+    # Prefer numeric public id for display; keep DesignModelId separately
+    $m{source_id} = $m{numeric_id} // $m{design_model_id};
   }
   return \%m;
+}
+
+# DSM00000002755057 → 2755057
+sub dsm_to_numeric ($dsm) {
+  return unless defined $dsm && $dsm =~ /^DSM0*([1-9]\d*)$/i;
+  return $1;
+}
+
+sub title_to_slug ($title) {
+  return unless defined $title && length $title;
+  my $s = lc $title;
+  $s =~ s/[^a-z0-9]+/-/g;
+  $s =~ s/^-+|-+$//g;
+  return length($s) ? $s : undef;
+}
+
+# Public model page, e.g. https://makerworld.com/en/models/2755057
+# (slug suffix is optional on MakerWorld; numeric id alone is enough and more stable)
+# DesignModelId-only (US…) is a last-resort fallback.
+sub makerworld_public_url {
+  my (%o) = @_;
+  my $num = $o{numeric_id};
+  return "https://makerworld.com/en/models/${num}" if $num;
+  return unless $o{design_model_id};
+  return 'https://makerworld.com/en/models/' . $o{design_model_id};
 }
 
 sub extract_3mf_thumb_to {
@@ -255,10 +292,22 @@ sub build_description {
 sub parse_makerworld_url {
   my ($url) = @_;
   return unless $url;
-  if ($url =~ m{makerworld\.com/(?:en|zh)/models/([A-Za-z0-9_-]+)}i) {
+  # Numeric (+ optional slug): /models/2755057-flexi-zipper-fidget-toy
+  if ($url =~ m{makerworld\.com/(?:en|zh)/models/(\d+)(?:-([A-Za-z0-9_-]+))?}i) {
+    my ($num, $slug) = ($1, $2);
+    return {
+      numeric_id  => $num,
+      slug        => $slug,
+      source_url  => makerworld_public_url(numeric_id => $num, slug => $slug),
+      source_site => 'makerworld',
+      source_id   => $num,
+    };
+  }
+  # DesignModelId form (legacy / deep links): /models/USxxxxxxxx
+  if ($url =~ m{makerworld\.com/(?:en|zh)/models/(US[A-Za-z0-9]+)}i) {
     return {
       design_model_id => $1,
-      source_url      => "https://makerworld.com/en/models/$1",
+      source_url      => makerworld_public_url(design_model_id => $1),
       source_site     => 'makerworld',
       source_id       => $1,
     };

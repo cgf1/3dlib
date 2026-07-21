@@ -30,6 +30,15 @@ sub db_connect {
 # alias
 sub connect { goto &db_connect }
 
+# After fork(), the inherited DBI handle is not safe — open a fresh one.
+sub reconnect {
+  if ($dbh) {
+    eval { $dbh->disconnect };
+    $dbh = undef;
+  }
+  return db_connect();
+}
+
 sub dbh {
   $dbh = db_connect() unless $dbh;
   return $dbh;
@@ -135,7 +144,19 @@ sub init_schema {
       END
     });
   }
+
+  # Migrations for existing DBs
+  _ensure_column($d, 'items', 'description_orig', 'TEXT');
   return 1;
+}
+
+sub _ensure_column {
+  my ($d, $table, $col, $typedef) = @_;
+  my $rows = $d->selectall_arrayref("PRAGMA table_info($table)");
+  for my $r ($rows->@*) {
+    return if ($r->[1] // '') eq $col;
+  }
+  $d->do("ALTER TABLE $table ADD COLUMN $col $typedef");
 }
 
 sub log_rename {
@@ -216,7 +237,7 @@ sub upsert_item {
   my ($row) = @_;
   require Util;
   # Ensure Unicode text fields are real characters, not mojibake byte-as-latin1
-  for my $k (qw(path name name_orig description source_url source_id designer)) {
+  for my $k (qw(path name name_orig description description_orig source_url source_id designer)) {
     $row->{$k} = Util::text_for_db($row->{$k}) if defined $row->{$k};
   }
   my $d  = dbh();
@@ -226,7 +247,7 @@ sub upsert_item {
     $d->do(
       q{
         UPDATE items SET
-          kind=?, type=?, name=?, name_orig=?, description=?,
+          kind=?, type=?, name=?, name_orig=?, description=?, description_orig=?,
           source_site=?, source_url=?, source_id=?, sources_json=?,
           design_model_id=?, download_uuid=?,
           mtime=?, atime=?, size_bytes=?, file_count=?,
@@ -236,7 +257,7 @@ sub upsert_item {
       },
       undef,
       $row->{kind}, $row->{type}, $row->{name}, $row->{name_orig},
-      $row->{description},
+      $row->{description}, $row->{description_orig},
       $row->{source_site}, $row->{source_url}, $row->{source_id},
       $row->{sources_json},
       $row->{design_model_id}, $row->{download_uuid},
@@ -249,16 +270,16 @@ sub upsert_item {
   $d->do(
     q{
       INSERT INTO items(
-        kind, type, path, name, name_orig, description,
+        kind, type, path, name, name_orig, description, description_orig,
         source_site, source_url, source_id, sources_json,
         design_model_id, download_uuid,
         mtime, atime, size_bytes, file_count, content_hash, thumb_path,
         status, created_at, updated_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
     },
     undef,
     $row->{kind}, $row->{type}, $row->{path}, $row->{name}, $row->{name_orig},
-    $row->{description},
+    $row->{description}, $row->{description_orig},
     $row->{source_site}, $row->{source_url}, $row->{source_id},
     $row->{sources_json},
     $row->{design_model_id}, $row->{download_uuid},

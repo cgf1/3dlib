@@ -13,7 +13,7 @@ use LibConfig qw(library_root);
 use Util qw(
   dry_print file_hash file_stat_info ensure_unique_path sanitize_filename
   look_like_project path_ext classify_role read_text safe_rename_or_move
-  translate_name human_size fmt_time now_ts text_for_db
+  translate_name pick_import_basename human_size fmt_time now_ts text_for_db
 );
 use Meta ();
 use DB ();
@@ -244,20 +244,14 @@ sub _import_file {
     }
   }
 
-  # Prefer filename name= (Bambu downloads), then 3MF Title, then basename
-  my $display = ($bambu && $bambu->{name}) || $meta3->{title} || basename($file);
-  $display = text_for_db($display);
-  $display = translate_name($display);
-  $display = sanitize_filename($display);
-  # ensure extension
-  my ($stem, undef, $fext) = fileparse($display, qr/\.[^.]*/);
-  if (lc($fext // '') ne ".$ext") {
-    $display = "$stem.$ext";
-    $display =~ s/\.+$ext\.$ext$/.$ext/i;
-    $display = sanitize_filename($stem) . ".$ext" unless $display =~ /\.$ext$/i;
-  }
-  # fix double ext
-  $display =~ s/\.3mf\.3mf$/.3mf/i;
+  # Prefer Bambu name=, else original basename (e.g. 5cm_单色.3mf), else 3MF Title.
+  # Never prefer a long Chinese Title over a clear user filename.
+  my $display = pick_import_basename(
+    path       => $file,
+    ext        => $ext,
+    bambu_name => $bambu && $bambu->{name},
+    title      => $meta3->{title},
+  );
 
   my $subdir = $LibConfig::TYPE_DIRS{$ext} // $LibConfig::TYPE_DIRS{$type} // 'inbox';
   my $dest   = ensure_unique_path("$root/$subdir/$display");
@@ -285,7 +279,7 @@ sub _import_file {
   }
 
   my $st = file_stat_info($dest);
-  my $summary = $meta3->{description} || $meta3->{title} || $stem;
+  my $summary = $meta3->{description} || $meta3->{title} || $display;
   my $desc = Meta::build_description(
     summary    => $summary,
     designer   => $meta3->{designer},
@@ -293,6 +287,7 @@ sub _import_file {
     source_url => $meta3->{source_url},
     mtime      => $st->{mtime},
   );
+  my ($desc_en, $desc_orig) = _maybe_translate_desc($desc);
 
   my $item_id = DB::upsert_item({
     kind            => 'file',
@@ -300,7 +295,8 @@ sub _import_file {
     path            => $dest,
     name            => text_for_db(basename($dest)),
     name_orig       => $name_orig,
-    description     => $desc,
+    description     => $desc_en,
+    description_orig => $desc_orig,
     source_site     => $meta3->{source_site},
     source_url      => $meta3->{source_url},
     source_id       => $meta3->{source_id},
@@ -479,6 +475,7 @@ sub _catalog_project {
     source_url => $source_url,
     mtime      => $mtime,
   );
+  my ($desc_en, $desc_orig) = _maybe_translate_desc($desc);
 
   # primary hash: first model file
   my $phash;
@@ -495,7 +492,8 @@ sub _catalog_project {
     path            => text_for_db($dest),
     name            => text_for_db(basename($dest)),
     name_orig       => text_for_db($name_orig),
-    description     => $desc,
+    description     => $desc_en,
+    description_orig => $desc_orig,
     source_site     => $source_site,
     source_url      => $source_url,
     source_id       => $src->{source_id},
@@ -633,10 +631,12 @@ sub _catalog_exists_file {
     source_url => $meta3->{source_url},
     mtime      => $st->{mtime},
   );
+  my ($desc_en, $desc_orig) = _maybe_translate_desc($desc);
   my $item_id = DB::upsert_item({
     kind => 'file', type => $type, path => text_for_db($file),
     name => text_for_db(basename($file)), name_orig => text_for_db(basename($file)),
-    description => $desc,
+    description => $desc_en,
+    description_orig => $desc_orig,
     source_site => $meta3->{source_site},
     source_url => $meta3->{source_url},
     source_id => $meta3->{source_id},
@@ -651,6 +651,15 @@ sub _catalog_exists_file {
     role => 'model', content_hash => $hash,
   }]);
   return $item_id;
+}
+
+# Returns (description_en, description_orig_or_undef)
+sub _maybe_translate_desc {
+  my ($desc) = @_;
+  require Translate;
+  my $orig;
+  my $en = Translate::maybe_translate_description($desc, orig_ref => \$orig);
+  return ($en, $orig);
 }
 
 1;
