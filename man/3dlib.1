@@ -52,7 +52,10 @@ Import a model file, project directory, or zip into
 .BR /share/3d .
 Default is to
 .B move
-the source.  Directory imports only take 3D-related content; a single non-3D
+the source.  Prints a detailed per-item summary (name, source URL, size,
+thumb, description snippet) unless
+.B \-\-quiet
+is given.  Directory imports only take 3D-related content; a single non-3D
 file is an error.  Zips are unpacked into
 .BR projects/ .
 Duplicates (content hash or MakerWorld DesignModelId) re-use the existing
@@ -66,6 +69,34 @@ Remove catalog entries.  By default also deletes the model files under
 and the thumbnail.  Refuses to delete paths outside the library root unless
 .B \-\-keep\-files
 is given (catalog-only removal).
+.TP
+.BI edit " ID|PATH"
+Update catalog metadata for one item (name, description, source URL(s),
+status, site ids, tags).  Does not rename or move files.  Only options you pass
+are changed.  Useful flags:
+.BR \-\-url ,
+.BR \-\-add\-url ,
+.BR \-\-description ,
+.BR \-\-name ,
+.BR \-\-status ,
+.BR \-\-tag ,
+.BR \-\-tags ,
+.BR \-\-dryrun .
+Description may be
+.B @file
+or
+.B \-
+(stdin).
+.TP
+.BI tag " [ID|PATH] [TAG]..."
+.TQ
+.BI tags
+Manage catalog keywords/tags (not present in Bambu 3MF metadata — you add
+them).  With no ID, lists all tags and counts.  With an ID, add/remove/set
+tags.  Filter with
+.B 3dlib ls \-\-tag clasp
+(repeatable; AND).  Also searchable via
+.BR query .
 .TP
 .B scan
 Catalog files already present under
@@ -87,7 +118,24 @@ List catalog items (newest first).  Filters:
 .BR \-\-limit .
 .TP
 .BI describe " ID|PATH"
-Show full metadata for one catalog item.
+Show catalog details.  With
+.B \-\-view ,
+also open the thumbnail (see
+.BR show ).
+.TP
+.BI show " ID|PATH"
+.TQ
+.BI inspect " ID|PATH"
+.TQ
+.BI view " ID|PATH"
+Print item details and open the thumbnail in an image viewer
+(default
+.BR feh ).
+Override with
+.B THREEDLIB_IMAGE_VIEWER
+or config
+.BR image_viewer .
+Generates a thumb if missing when possible.
 .TP
 .BI thumbs " [ID|PATH]..."
 Generate thumbnails.  Order: project images, embedded 3MF previews, then
@@ -147,6 +195,14 @@ or
 .BR web.local_admin=false .
 Gallery supports multi-select download (zip) and bulk delete (admin).
 Item pages have a Download button.
+Admins also get a
+.B Settings
+page to edit
+.I config.json
+(library paths, web passwords, translation),
+and an
+.B Edit
+page per item for name, description, source URLs, and related metadata.
 .TP
 .B install-handler
 Install a desktop entry and set
@@ -162,14 +218,22 @@ etc.).  Safe to re-run; also runs during
 .BR scan .
 .TP
 .BI translate " [ID|PATH]..."
-Translate Chinese catalog descriptions to English via an OpenAI-compatible
-API (ChatGPT or xAI Grok).  Uses
+Translate non-English catalog names and descriptions (Chinese, German,
+French, etc.) to English via an OpenAI-compatible API (ChatGPT or xAI Grok).
+Uses
 .B OPENAI_API_KEY
 /
 .B XAI_API_KEY .
-Original text is stored in
-.BR description_orig .
-Also runs automatically on import when enabled (default).
+Originals are stored in
+.B name_orig
+and
+.BR description_orig
+(files on disk are not renamed).
+Detection defaults to all non-English
+.RB ( translate.detect=auto );
+set
+.B cjk
+for Chinese-only.  Also runs automatically on import when enabled (default).
 .TP
 .B help
 Global help.  Use
@@ -265,9 +329,10 @@ Override library root (default
 # Copy a project into the library
 3dlib import /share/bambu/wallet --copy
 
-# Search and inspect
+# Search and inspect (thumbnail via feh / image_viewer)
 3dlib query wallet
 3dlib describe 42
+3dlib show 42
 
 # Delete catalog entry and library files
 3dlib delete 42 --dryrun

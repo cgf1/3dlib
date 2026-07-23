@@ -288,13 +288,15 @@ sub _import_file {
     mtime      => $st->{mtime},
   );
   my ($desc_en, $desc_orig) = _maybe_translate_desc($desc);
+  my ($name_en, $name_keep) =
+    _maybe_translate_name(text_for_db(basename($dest)), $name_orig);
 
   my $item_id = DB::upsert_item({
     kind            => 'file',
     type            => $type,
     path            => $dest,
-    name            => text_for_db(basename($dest)),
-    name_orig       => $name_orig,
+    name            => $name_en,
+    name_orig       => $name_keep,
     description     => $desc_en,
     description_orig => $desc_orig,
     source_site     => $meta3->{source_site},
@@ -476,6 +478,8 @@ sub _catalog_project {
     mtime      => $mtime,
   );
   my ($desc_en, $desc_orig) = _maybe_translate_desc($desc);
+  my ($name_en, $name_keep) =
+    _maybe_translate_name(text_for_db(basename($dest)), text_for_db($name_orig));
 
   # primary hash: first model file
   my $phash;
@@ -490,8 +494,8 @@ sub _catalog_project {
     kind            => 'project',
     type            => $type,
     path            => text_for_db($dest),
-    name            => text_for_db(basename($dest)),
-    name_orig       => text_for_db($name_orig),
+    name            => $name_en,
+    name_orig       => $name_keep,
     description     => $desc_en,
     description_orig => $desc_orig,
     source_site     => $source_site,
@@ -659,6 +663,23 @@ sub _maybe_translate_desc {
   require Translate;
   my $orig;
   my $en = Translate::maybe_translate_description($desc, orig_ref => \$orig);
+  return ($en, $orig);
+}
+
+# Returns (name_en, name_orig). Catalog name only — does not rename on disk.
+sub _maybe_translate_name {
+  my ($name, $existing_orig) = @_;
+  require Translate;
+  my $kept;
+  my $en = Translate::maybe_translate_name($name, orig_ref => \$kept);
+  my $orig = $existing_orig;
+  if ($kept) {
+    # Prefer a distinct original source name when we already had one
+    if (!defined $orig || !length $orig || $orig eq $en) {
+      $orig = $kept;
+    }
+  }
+  $orig //= $name;
   return ($en, $orig);
 }
 

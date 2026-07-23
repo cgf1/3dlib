@@ -6,6 +6,7 @@ use File::Temp qw(tempdir);
 use File::Path qw(make_path);
 use Cwd qw(abs_path);
 use HTTP::Tiny;
+use Text::ParseWords qw(shellwords);
 use Meta ();
 use Import ();
 use DB ();
@@ -15,11 +16,12 @@ use Item ();
 
 sub run {
   my (%o) = @_;
-  my $target   = $o{target} // die "run: target required\n";
-  my $dryrun   = $o{dryrun} // 0;
+  my $target    = $o{target} // die "run: target required\n";
+  my $dryrun    = $o{dryrun} // 0;
   my $no_import = $o{no_import} // 0;
-  my $studio   = LibConfig::load_config()->{bambu_studio}
-    // LibConfig::BAMBU_STUDIO;
+  my $app       = lc($o{app} // 'studio');
+  $app = 'studio' if $app eq 'bambu' || $app eq 'bambu-studio' || $app eq 'bambustudio';
+  $app = 'freecad' if $app eq 'fc' || $app eq 'fcstd';
 
   my $open_path;
   my $item_id;
@@ -35,9 +37,8 @@ sub run {
       $target = $p->{http_url};
     }
     else {
-      # Pass through to Studio — it understands the deep link; we still log
       dry_print($dryrun, "passing scheme URL through to Bambu Studio");
-      return _exec_studio($studio, $target, $dryrun);
+      return _launch_app('studio', $target, $dryrun);
     }
   }
 
@@ -46,11 +47,10 @@ sub run {
     my $mw = Meta::parse_makerworld_url($target);
     if ($mw) {
       dry_print($dryrun, "MakerWorld model: $mw->{design_model_id}");
-      # Dedupe by design id
       if (my $ex = DB::find_by_design_id($mw->{design_model_id})) {
         my \%existing = $ex;
         dry_print($dryrun, "already in library #$existing{id}: $existing{path}");
-        $open_path = _openable_path($ex);
+        $open_path = _openable_path($ex, $app);
         $item_id   = $existing{id};
       }
       else {
@@ -74,15 +74,13 @@ sub run {
           return { dryrun => 1, url => $mw->{source_url} };
         }
         else {
-          # Fall back: open Studio with makerworld page / hope deep link works
           warn "Could not download model automatically; launching Studio with URL.\n";
           warn "After Studio saves/opens the file, run: 3dlib scan\n";
-          return _exec_studio($studio, $target, $dryrun);
+          return _launch_app('studio', $target, $dryrun);
         }
       }
     }
     else {
-      # Non-MW HTTP: try download if ends with 3mf/stl
       if ($target =~ /\.(3mf|stl|zip)(\?|$)/i) {
         my $dl = _download_url($target, $dryrun);
         if ($dl && !$no_import && !$dryrun) {
@@ -96,7 +94,7 @@ sub run {
         }
       }
       else {
-        return _exec_studio($studio, $target, $dryrun);
+        return _launch_app('studio', $target, $dryrun);
       }
     }
   }
@@ -125,56 +123,144 @@ sub run {
   elsif ($target =~ /^\d+$/) {
     my $it = DB::get_item($target) or die "No item id $target\n";
     my \%row = $it;
-    $open_path = _openable_path($it);
+    $open_path = _openable_path($it, $app);
     $item_id   = $row{id};
   }
   else {
     die "Cannot resolve target: $target\n";
   }
 
-  die "Nothing to open\n" unless $open_path;
-  dry_print($dryrun, "open: $open_path", $item_id ? " (item #$item_id)" : '');
-  return _exec_studio($studio, $open_path, $dryrun, $item_id);
+  die "Nothing to open\n" unless $open_path && length $open_path;
+  die "Missing file: $open_path\n" unless $open_path =~ m{^https?://}i || -e $open_path;
+
+  dry_print($dryrun, "open ($app): $open_path", $item_id ? " (item #$item_id)" : '');
+  return _launch_app($app, $open_path, $dryrun, $item_id);
 }
 
-sub _openable_path ($item) {
-  # $item may be a plain hashref from DB
+sub _openable_path ($item, $app = 'studio') {
+  my $prefer =
+      $app eq 'freecad' ? 'fcstd'
+    : $app eq 'studio'  ? '3mf'
+    : undef;
+
   if (ref $item && ref $item ne 'HASH' && $item->can('openable_path')) {
-    return $item->openable_path;
+    return $item->openable_path($prefer);
   }
   my \%it = $item;
-  return Item::from_row(\%it)->openable_path;
+  return Item::from_row(\%it)->openable_path($prefer);
 }
 
-sub _exec_studio {
-  my ($studio, $arg, $dryrun, $item_id) = @_;
+# Expand a command template into argv (or shell string).
+# {file} is replaced with the path; if omitted, path is appended.
+sub expand_cmd {
+  my ($spec, $file, %o) = @_;
+  $spec //= '';
+  $spec =~ s/^\s+|\s+\z//g;
+  die "empty launch command\n" unless length $spec;
+
+  if ($o{shell}) {
+    my $s = $spec;
+    if ($s =~ /\{file\}/) {
+      my $q = $file;
+      $q =~ s/'/'\\''/g;
+      $s =~ s/\{file\}/'$q'/g;
+    }
+    else {
+      my $q = $file;
+      $q =~ s/'/'\\''/g;
+      $s .= " '$q'";
+    }
+    return (shell => 1, cmd => $s);
+  }
+
+  my $ph = "\0FILE\0";
+  my $tmp = $spec;
+  my $had_ph = ($tmp =~ s/\{file\}/$ph/g) ? 1 : 0;
+  my @cmd = shellwords($tmp);
+  @cmd = map { $_ eq $ph ? $file : $_ } @cmd;
+  push @cmd, $file unless $had_ph;
+  die "empty launch command after parse\n" unless @cmd;
+  return (shell => 0, cmd => \@cmd);
+}
+
+sub _launch_app {
+  my ($app, $arg, $dryrun, $item_id) = @_;
+  $app //= 'studio';
+
+  my ($label, $spec, $shell, $require_local_bin);
+  if ($app eq 'freecad') {
+    $label             = 'FreeCAD';
+    $spec              = LibConfig::freecad_cmd();
+    $shell             = LibConfig::freecad_shell();
+    $require_local_bin = 0;    # may be "ssh tomoon freecad"
+  }
+  else {
+    $label             = 'Bambu Studio';
+    $spec              = LibConfig::load_config()->{bambu_studio} // LibConfig::BAMBU_STUDIO;
+    $shell             = 0;
+    $require_local_bin = 1;
+  }
+
+  my %ex = expand_cmd($spec, $arg, shell => $shell);
+
   if ($dryrun) {
-    dry_print(1, "exec $studio $arg");
-    return { dryrun => 1, studio => $studio, open => $arg, item_id => $item_id };
+    if ($ex{shell}) {
+      dry_print(1, "exec sh -c ", $ex{cmd});
+    }
+    else {
+      dry_print(1, "exec ", join(' ', $ex{cmd}->@*));
+    }
+    return {
+      dryrun  => 1,
+      app     => $app,
+      label   => $label,
+      open    => $arg,
+      item_id => $item_id,
+      cmd     => $ex{shell} ? $ex{cmd} : join(' ', $ex{cmd}->@*),
+    };
   }
-  if (!-x $studio && !-f $studio) {
-    die "Bambu Studio not found: $studio\n";
+
+  if ($require_local_bin && !$ex{shell}) {
+    my $bin = $ex{cmd}[0];
+    if ($bin && $bin !~ m{/} && !-x $bin) {
+      # bare name on PATH is ok
+    }
+    elsif ($bin && $bin =~ m{/} && !-e $bin) {
+      die "$label not found: $bin\n";
+    }
   }
-  # Detach so web/CLI returns
+
   my $pid = fork();
   if (!defined $pid) {
-    exec($studio, $arg) or die "exec $studio: $!\n";
+    die "fork failed: $!\n";
   }
   if ($pid == 0) {
-    # child
-    open STDIN,  '<', '/dev/null';
-    open STDOUT, '>>', '/tmp/3dlib-studio.log';
-    open STDERR, '>>', '/tmp/3dlib-studio.log';
-    exec($studio, $arg) or exit 127;
+    open STDIN,  '<',  '/dev/null';
+    open STDOUT, '>>', '/tmp/3dlib-launch.log';
+    open STDERR, '>>', '/tmp/3dlib-launch.log';
+    if ($ex{shell}) {
+      exec('/bin/sh', '-c', $ex{cmd}) or exit 127;
+    }
+    else {
+      exec($ex{cmd}->@*) or exit 127;
+    }
   }
-  say "Launched Bambu Studio (pid $pid) on $arg";
-  return { ok => 1, pid => $pid, open => $arg, item_id => $item_id };
+  my $cmd_disp = $ex{shell} ? $ex{cmd} : join(' ', $ex{cmd}->@*);
+  say "Launched $label (pid $pid): $cmd_disp";
+  return {
+    ok      => 1,
+    app     => $app,
+    label   => $label,
+    pid     => $pid,
+    open    => $arg,
+    item_id => $item_id,
+    cmd     => $cmd_disp,
+    message => "Launched $label",
+  };
 }
 
 sub _try_download_makerworld {
   my ($mw, $dryrun) = @_;
-  # Public download endpoints are inconsistent/auth-gated.
-  # Try a few heuristics; return undef on failure.
   if ($dryrun) {
     dry_print(1, "would attempt MakerWorld download for $mw->{design_model_id}");
     return '/tmp/dryrun-makerworld.3mf';
@@ -183,13 +269,12 @@ sub _try_download_makerworld {
   my $id = $mw->{design_model_id};
   my @try = (
     "https://makerworld.com/api/v1/design-service/design/$id/download",
-    # numeric ids sometimes work differently
   );
 
   my $http = HTTP::Tiny->new(
-    agent => '3dlib/1.0',
+    agent        => '3dlib/1.0',
     max_redirect => 5,
-    timeout => 60,
+    timeout      => 60,
   );
 
   my $dir = LibConfig::library_root() . '/inbox';
@@ -199,9 +284,8 @@ sub _try_download_makerworld {
     dry_print(0, "GET $url");
     my $res = $http->get($url);
     next unless $res->{success};
-    my $ct = $res->{headers}{'content-type'} // '';
+    my $ct   = $res->{headers}{'content-type'} // '';
     my $body = $res->{content} // '';
-    # 3mf is a zip (PK)
     if ($body =~ /^PK/ || $ct =~ /3mf|octet|zip/i) {
       my $out = "$dir/$id.3mf";
       open my $fh, '>:raw', $out or next;
@@ -221,7 +305,7 @@ sub _download_url {
     return '/tmp/dryrun-download';
   }
   my $http = HTTP::Tiny->new(agent => '3dlib/1.0', timeout => 120, max_redirect => 5);
-  my $res = $http->get($url);
+  my $res  = $http->get($url);
   die "Download failed: $url ($res->{status})\n" unless $res->{success};
   my $name = basename($url);
   $name =~ s/\?.*//;

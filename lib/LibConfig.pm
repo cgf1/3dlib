@@ -11,6 +11,7 @@ our @EXPORT_OK = qw(
 use constant {
   DEFAULT_LIBRARY => '/share/3d',
   BAMBU_STUDIO    => '/usr/local/bin/bambu-studio',
+  DEFAULT_FREECAD => 'freecad',
   DEFAULT_PORT    => 31353,
 };
 
@@ -49,48 +50,106 @@ sub thumbs_dir () {
   return library_root() . '/.thumbs';
 }
 
+# External image viewer for `3dlib show` / describe --view (default: feh).
+# Override with THREEDLIB_IMAGE_VIEWER or config image_viewer / tools.image_viewer.
+sub image_viewer () {
+  my $cfg = load_config();
+  my $tools = (ref $cfg->{tools} eq 'HASH') ? $cfg->{tools} : {};
+  my $v =
+       $ENV{THREEDLIB_IMAGE_VIEWER}
+    // $cfg->{image_viewer}
+    // $tools->{image_viewer}
+    // 'feh';
+  $v =~ s/^\s+|\s+\z//g if defined $v;
+  return (defined $v && length $v) ? $v : 'feh';
+}
+
+# FreeCAD launch command (default: freecad).
+# Examples:
+#   "freecad"
+#   "ssh -Y tomoon freecad"
+#   "ssh -Y tomoon freecad {file}"
+# Env: THREEDLIB_FREECAD; config freecad or tools.freecad
+# Set freecad_shell / tools.freecad_shell true for full shell (pipes, complex quoting).
+sub freecad_cmd () {
+  my $cfg = load_config();
+  my $tools = (ref $cfg->{tools} eq 'HASH') ? $cfg->{tools} : {};
+  my $v =
+       $ENV{THREEDLIB_FREECAD}
+    // $cfg->{freecad}
+    // $tools->{freecad}
+    // DEFAULT_FREECAD;
+  $v =~ s/^\s+|\s+\z//g if defined $v;
+  return (defined $v && length $v) ? $v : DEFAULT_FREECAD;
+}
+
+sub freecad_shell () {
+  my $cfg = load_config();
+  my $tools = (ref $cfg->{tools} eq 'HASH') ? $cfg->{tools} : {};
+  my $v = $ENV{THREEDLIB_FREECAD_SHELL} // $cfg->{freecad_shell} // $tools->{freecad_shell};
+  return 0 unless defined $v;
+  return 0 if $v =~ /^(0|false|no|off)$/i;
+  return 1 if $v =~ /^(1|true|yes|on)$/i;
+  return $v ? 1 : 0;
+}
+
+# On-disk config path (env root or default). Independent of library_root inside the file.
+sub load_config_path () {
+  return ($ENV{THREEDLIB_ROOT} // DEFAULT_LIBRARY) . '/.library/config.json';
+}
+
+# Effective library's config path (after library_root is resolved).
 sub config_path () {
   return library_root() . '/.library/config.json';
 }
 
+# Raw file contents as a hash (no defaults). Empty hash if missing/invalid.
+sub read_config_file {
+  my ($path) = @_;
+  $path //= load_config_path();
+  return {} unless defined $path && -f $path;
+  open my $fh, '<:encoding(UTF-8)', $path or return {};
+  local $/;
+  my $raw = <$fh>;
+  close $fh;
+  require JSON::PP;
+  my $j = eval { JSON::PP->new->decode($raw) };
+  return (ref $j eq 'HASH') ? $j : {};
+}
+
 sub load_config {
-  my $path = DEFAULT_LIBRARY . '/.library/config.json';
-  # allow env override of root before config exists
-  if ($ENV{THREEDLIB_ROOT}) {
-    $path = $ENV{THREEDLIB_ROOT} . '/.library/config.json';
-  }
+  my $path = load_config_path();
   my %cfg = (
     library_root => $ENV{THREEDLIB_ROOT} // DEFAULT_LIBRARY,
     bind         => '0.0.0.0',
     port         => DEFAULT_PORT,
     bambu_studio => BAMBU_STUDIO,
   );
-  if (-f $path) {
-    open my $fh, '<:encoding(UTF-8)', $path or return \%cfg;
-    local $/;
-    my $raw = <$fh>;
-    close $fh;
-    require JSON::PP;
-    my $j = eval { JSON::PP->new->utf8->decode($raw) };
-    if ($j && ref $j eq 'HASH') {
-      %cfg = (%cfg, %$j);
-    }
+  my $j = read_config_file($path);
+  if ($j && ref $j eq 'HASH' && keys %$j) {
+    %cfg = (%cfg, %$j);
   }
   $cfg{library_root} = $ENV{THREEDLIB_ROOT} if $ENV{THREEDLIB_ROOT};
   return \%cfg;
 }
 
+# Write config hash to the on-disk path load_config reads (pretty JSON).
 sub save_config {
   my ($cfg) = @_;
+  die "save_config: expected hashref\n" unless ref $cfg eq 'HASH';
   require JSON::PP;
-  my $root = $cfg->{library_root} // DEFAULT_LIBRARY;
-  my $dir  = "$root/.library";
   require File::Path;
+  my $path = load_config_path();
+  my $dir  = $path =~ s{/[^/]+\z}{}r;
   File::Path::make_path($dir);
-  my $path = "$dir/config.json";
-  open my $fh, '>:encoding(UTF-8)', $path or die "Cannot write $path: $!\n";
-  print {$fh} JSON::PP->new->utf8->pretty->canonical->encode($cfg);
+  # Atomic-ish replace
+  my $tmp = "$path.tmp.$$";
+  open my $fh, '>:encoding(UTF-8)', $tmp or die "Cannot write $tmp: $!\n";
+  # No ->utf8: handle is already :encoding(UTF-8)
+  print {$fh} JSON::PP->new->pretty->canonical->encode($cfg);
   close $fh;
+  rename($tmp, $path) or die "Cannot replace $path: $!\n";
+  return $path;
 }
 
 sub is_model_ext ($ext) {

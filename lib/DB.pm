@@ -147,7 +147,140 @@ sub init_schema {
 
   # Migrations for existing DBs
   _ensure_column($d, 'items', 'description_orig', 'TEXT');
+
+  # User / catalog keywords (tags). Not present in Bambu 3MF metadata.
+  $d->do(q{
+    CREATE TABLE IF NOT EXISTS item_tags (
+      item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+      tag TEXT NOT NULL,
+      PRIMARY KEY (item_id, tag)
+    )
+  });
+  $d->do('CREATE INDEX IF NOT EXISTS idx_item_tags_tag ON item_tags(tag)');
   return 1;
+}
+
+# Normalize a keyword/tag: lowercase, trim, spaces → hyphens.
+sub normalize_tag {
+  my ($t) = @_;
+  return unless defined $t;
+  require Util;
+  $t = Util::text_for_db($t);
+  $t =~ s/^\s+|\s+\z//g;
+  $t = lc $t;
+  $t =~ s/\s+/-/g;
+  $t =~ s/[^a-z0-9._+-]//g;
+  return length($t) ? $t : undef;
+}
+
+sub normalize_tags {
+  my (@raw) = @_;
+  my @out;
+  my %seen;
+  for my $r (@raw) {
+    next unless defined $r;
+    # Allow "clasp, jewelry" in one string
+    for my $part (split /[,;|]+/, $r) {
+      my $t = normalize_tag($part);
+      next unless $t;
+      next if $seen{$t}++;
+      push @out, $t;
+    }
+  }
+  return @out;
+}
+
+sub get_item_tags {
+  my ($item_id) = @_;
+  return [] unless defined $item_id;
+  my $rows = dbh()->selectall_arrayref(
+    'SELECT tag FROM item_tags WHERE item_id = ? ORDER BY tag',
+    undef, $item_id
+  );
+  return [ map { $_->[0] } $rows->@* ];
+}
+
+# Attach tags list onto item hashref(s) as { tags => [...] }
+sub attach_tags {
+  my ($items) = @_;
+  return $items unless $items;
+  my @list = ref $items eq 'ARRAY' ? $items->@* : ($items);
+  return $items unless @list;
+  my @ids = map { $_->{id} } grep { $_ && $_->{id} } @list;
+  return $items unless @ids;
+
+  my $ph = join ',', map { '?' } @ids;
+  my $rows = dbh()->selectall_arrayref(
+    "SELECT item_id, tag FROM item_tags WHERE item_id IN ($ph) ORDER BY tag",
+    undef, @ids
+  );
+  my %by;
+  for my $r ($rows->@*) {
+    push $by{ $r->[0] }->@*, $r->[1];
+  }
+  for my $it (@list) {
+    $it->{tags} = $by{ $it->{id} } // [];
+  }
+  return $items;
+}
+
+# Replace all tags for an item.
+sub set_item_tags {
+  my ($item_id, @tags) = @_;
+  @tags = normalize_tags(@tags);
+  my $d = dbh();
+  $d->do('DELETE FROM item_tags WHERE item_id = ?', undef, $item_id);
+  for my $t (@tags) {
+    $d->do(
+      'INSERT OR IGNORE INTO item_tags(item_id, tag) VALUES (?,?)',
+      undef, $item_id, $t
+    );
+  }
+  $d->do('UPDATE items SET updated_at = ? WHERE id = ?', undef, now_ts(), $item_id);
+  return get_item_tags($item_id);
+}
+
+sub add_item_tags {
+  my ($item_id, @tags) = @_;
+  @tags = normalize_tags(@tags);
+  return get_item_tags($item_id) unless @tags;
+  my $d = dbh();
+  for my $t (@tags) {
+    $d->do(
+      'INSERT OR IGNORE INTO item_tags(item_id, tag) VALUES (?,?)',
+      undef, $item_id, $t
+    );
+  }
+  $d->do('UPDATE items SET updated_at = ? WHERE id = ?', undef, now_ts(), $item_id);
+  return get_item_tags($item_id);
+}
+
+sub remove_item_tags {
+  my ($item_id, @tags) = @_;
+  @tags = normalize_tags(@tags);
+  return get_item_tags($item_id) unless @tags;
+  my $d = dbh();
+  for my $t (@tags) {
+    $d->do('DELETE FROM item_tags WHERE item_id = ? AND tag = ?', undef, $item_id, $t);
+  }
+  $d->do('UPDATE items SET updated_at = ? WHERE id = ?', undef, now_ts(), $item_id);
+  return get_item_tags($item_id);
+}
+
+# All tags with usage counts: [ { tag => 'clasp', count => 3 }, ... ]
+sub list_tags {
+  my (%o) = @_;
+  my $limit = $o{limit} // 500;
+  return dbh()->selectall_arrayref(
+    q{
+      SELECT tag, COUNT(*) AS count
+      FROM item_tags
+      GROUP BY tag
+      ORDER BY count DESC, tag
+      LIMIT ?
+    },
+    { Slice => {} }, $limit
+  );
 }
 
 sub _ensure_column {
@@ -213,7 +346,54 @@ sub find_by_path {
 
 sub get_item {
   my ($id) = @_;
-  return dbh()->selectrow_hashref('SELECT * FROM items WHERE id = ?', undef, $id);
+  my $row = dbh()->selectrow_hashref('SELECT * FROM items WHERE id = ?', undef, $id);
+  attach_tags($row) if $row;
+  return $row;
+}
+
+# Partial update of catalog metadata (not path/files). Returns 1 if a row was updated.
+# Allowed keys: name, name_orig, description, description_orig, source_site, source_url,
+# source_id, sources_json, design_model_id, status.
+sub update_item_fields {
+  my ($id, $fields) = @_;
+  die "update_item_fields: missing id\n" unless defined $id && $id =~ /^\d+$/;
+  die "update_item_fields: expected hashref\n" unless ref $fields eq 'HASH';
+
+  my %allowed = map { $_ => 1 } qw(
+    name name_orig description description_orig
+    source_site source_url source_id sources_json
+    design_model_id status
+  );
+
+  require Util;
+  my @sets;
+  my @vals;
+  for my $k (sort keys %$fields) {
+    next unless $allowed{$k};
+    my $v = $fields->{$k};
+    if (defined $v) {
+      $v = Util::text_for_db($v) if $k =~ /^(name|name_orig|description|description_orig|source_url|source_site|source_id|design_model_id)\z/;
+      # Empty optional strings → NULL
+      if ($k ne 'name' && $k ne 'status' && !length($v)) {
+        $v = undef;
+      }
+    }
+    push @sets, "$k = ?";
+    push @vals, $v;
+  }
+  return 0 unless @sets;
+
+  get_item($id) or die "No item with id $id\n";
+
+  push @sets, 'updated_at = ?';
+  push @vals, now_ts();
+  push @vals, $id;
+
+  my $n = dbh()->do(
+    'UPDATE items SET ' . join(', ', @sets) . ' WHERE id = ?',
+    undef, @vals
+  );
+  return $n ? 1 : 0;
 }
 
 sub delete_item {
@@ -314,7 +494,9 @@ sub search {
   if ($q && $q =~ /\S/) {
     my $fts = $q;
     $fts =~ s/"//g;
-    return $d->selectall_arrayref(
+    # FTS on catalog text, plus exact/partial tag matches
+    my $tag = normalize_tag($q);
+    my $items = $d->selectall_arrayref(
       q{
         SELECT items.* FROM items_fts
         JOIN items ON items.id = items_fts.rowid
@@ -324,11 +506,32 @@ sub search {
       },
       { Slice => {} }, $fts, $limit
     );
+    if ($tag) {
+      my $by_tag = $d->selectall_arrayref(
+        q{
+          SELECT items.* FROM items
+          JOIN item_tags ON item_tags.item_id = items.id
+          WHERE item_tags.tag = ? OR item_tags.tag LIKE ?
+          ORDER BY items.mtime DESC
+          LIMIT ?
+        },
+        { Slice => {} }, $tag, "%$tag%", $limit
+      );
+      my %seen = map { $_->{id} => 1 } $items->@*;
+      for my $it ($by_tag->@*) {
+        next if $seen{ $it->{id} }++;
+        push $items->@*, $it;
+      }
+    }
+    attach_tags($items);
+    return $items;
   }
-  return $d->selectall_arrayref(
+  my $items = $d->selectall_arrayref(
     'SELECT * FROM items ORDER BY mtime DESC LIMIT ?',
     { Slice => {} }, $limit
   );
+  attach_tags($items);
+  return $items;
 }
 
 sub list_items {
@@ -353,11 +556,33 @@ sub list_items {
   if ($o{no_source}) {
     push @w, "(source_url IS NULL OR source_url = '')";
   }
+
+  # --tag / tag => 'clasp' or tags => ['clasp','jewelry'] (AND semantics)
+  my @tags = normalize_tags(
+    ref $o{tags} eq 'ARRAY' ? $o{tags}->@* : (),
+    defined $o{tag} ? $o{tag} : (),
+  );
+  if (@tags) {
+    # Items that have all requested tags.
+    # Note: bind the tag strings only — SQLite mishandles bound values in
+    # HAVING COUNT(...)=? (always empty). $n is a controlled integer.
+    my $n  = 0 + @tags;
+    my $ph = join ',', map { '?' } @tags;
+    push @w, "id IN (SELECT item_id FROM item_tags WHERE tag IN ($ph) "
+      . "GROUP BY item_id HAVING COUNT(DISTINCT tag) = $n)";
+    push @b, @tags;
+  }
+  if ($o{no_tags}) {
+    push @w, 'id NOT IN (SELECT DISTINCT item_id FROM item_tags)';
+  }
+
   my $where = @w ? ('WHERE ' . join(' AND ', @w)) : '';
   my $limit = $o{limit} // 200;
   my $sql   = "SELECT * FROM items $where ORDER BY mtime DESC LIMIT ?";
   push @b, $limit;
-  return dbh()->selectall_arrayref($sql, { Slice => {} }, @b);
+  my $items = dbh()->selectall_arrayref($sql, { Slice => {} }, @b);
+  attach_tags($items);
+  return $items;
 }
 
 sub stats {

@@ -42,12 +42,20 @@ my %cmds = (
   import            => \&cmd_import,
   delete            => \&cmd_delete,
   rm                => \&cmd_delete,
+  edit              => \&cmd_edit,
+  tag               => \&cmd_tag,
+  tags              => \&cmd_tag,
+  keyword           => \&cmd_tag,
+  keywords          => \&cmd_tag,
   scan              => \&cmd_scan,
   query             => \&cmd_query,
   search            => \&cmd_query,
   ls                => \&cmd_ls,
   list              => \&cmd_ls,
   describe          => \&cmd_describe,
+  show              => \&cmd_show,
+  inspect           => \&cmd_show,
+  view              => \&cmd_show,
   thumbs            => \&cmd_thumbs,
   stats             => \&cmd_stats,
   run               => \&cmd_run,
@@ -58,6 +66,28 @@ my %cmds = (
   'repair-encoding' => \&cmd_repair_encoding,
   translate         => \&cmd_translate,
   help              => \&cmd_help,
+);
+
+# Primary command names + one-line summary (aliases omitted; help is sorted).
+my @COMMAND_HELP = (
+  [ 'delete',           'Remove catalog entry (and files under /share/3d)' ],
+  [ 'describe',         'Show one item in detail' ],
+  [ 'edit',             'Update catalog metadata (URL, description, name, …)' ],
+  [ 'help',             'This help, or subcommand help' ],
+  [ 'tag',              'Add/remove/list keywords (tags) on items' ],
+  [ 'import',           'Import file/dir/zip into /share/3d' ],
+  [ 'init',             'Create library dirs + empty database' ],
+  [ 'install-handler',  'Register bambustudio:// handler' ],
+  [ 'ls',               'List items' ],
+  [ 'query',            'Full-text search' ],
+  [ 'repair-encoding',  'Fix UTF-8 mojibake in catalog fields' ],
+  [ 'run',              'Import (optional) + open in Bambu Studio' ],
+  [ 'scan',             'Catalog files already under /share/3d' ],
+  [ 'serve',            'Web UI on port 31353' ],
+  [ 'show',             'Describe item and open its thumbnail (feh, configurable)' ],
+  [ 'stats',            'Counts and coverage' ],
+  [ 'thumbs',           'Generate missing thumbs (3MF / photos / mesh-preview)' ],
+  [ 'translate',        'Translate non-English names/descriptions via OpenAI/Grok API' ],
 );
 
 if (!$cmds{$cmd}) {
@@ -169,19 +199,21 @@ USAGE
 
 sub cmd_import {
   my @args = @_;
-  my ($dryrun, $move, $copy, $clean);
+  my ($dryrun, $move, $copy, $clean, $quiet);
   my $usage = <<'USAGE';
 Usage: 3dlib import PATH [options]
 
   Import a model file, project directory, or zip into /share/3d.
   Default is to MOVE the source into the library.
+  Prints a detailed summary per item unless --quiet is given.
 
 Options:
-  --dryrun, --dry-run   Describe actions only; do not change files
-  --move                Move into library (default)
-  --copy                Copy into library; leave source in place
   --clean               After success: remove source (with --copy) or
                         empty leftover dirs (with --move on directories)
+  --copy                Copy into library; leave source in place
+  --dryrun, --dry-run   Describe actions only; do not change files
+  --move                Move into library (default)
+  -q, --quiet           One-line results only (no per-item detail)
   -h, --help            Show this help
 
 PATH:
@@ -194,6 +226,7 @@ USAGE
     'move!'          => \$move,
     'copy!'          => \$copy,
     'clean'          => \$clean,
+    'quiet|q'        => \$quiet,
   );
 
   my $path = shift @args
@@ -215,7 +248,7 @@ USAGE
     copy   => $do_copy,
     clean  => $clean ? 1 : 0,
   );
-  _print_results($res);
+  _print_results($res, quiet => $quiet ? 1 : 0);
 }
 
 sub cmd_delete {
@@ -248,6 +281,255 @@ USAGE
     keep_files => $keep_files ? 1 : 0,
   );
   say scalar($res->@*), " item(s) processed";
+}
+
+sub cmd_edit {
+  my @args = @_;
+  my (
+    $dryrun, $name, $description, $description_orig, $status,
+    $url, $clear_url, $clear_urls, $source_site, $source_id, $design_model_id,
+    $auto_from_url, $tags, $clear_tags,
+  );
+  my (@add_urls, @add_tags, @remove_tags);
+  my $usage = <<'USAGE';
+Usage: 3dlib edit ID|PATH [options]
+
+  Update catalog metadata for one item (does not rename or move files).
+  Only fields you pass are changed; omitted fields stay as they are.
+
+Examples:
+  3dlib edit 9 --url 'https://makerworld.com/en/models/935041'
+  3dlib edit 9 --add-url 'https://printables.com/model/123' --status active
+  3dlib edit 9 --description 'Short note' --name 'Better name'
+  3dlib edit 9 --tag clasp --tag jewelry
+  3dlib edit 9 --tags clasp,jewelry
+  3dlib edit 9 --description=@notes.txt
+  3dlib edit 9 --clear-urls --dryrun
+
+Options:
+  --add-tag TAG              Add keyword/tag (repeatable)
+  --add-url URL              Append an additional source URL (repeatable)
+  --auto-from-url            Fill empty site/ids from --url (default when --url set)
+  --clear-tags               Remove all keywords/tags
+  --clear-url                Clear primary source URL
+  --clear-urls               Clear primary + additional URLs and related site ids
+  --description TEXT         Set description (@file or - for stdin)
+  --description-orig TEXT    Set original/CJK description (@file or -)
+  --design-model-id ID       MakerWorld DesignModelId
+  --dryrun, --dry-run        Show changes only
+  --name TEXT                Display name
+  --no-auto-from-url         Do not infer site/ids from URL
+  --remove-tag TAG           Remove keyword/tag (repeatable)
+  --source-id ID             Site-specific id
+  --source-site NAME         e.g. makerworld, printables
+  --status TEXT              e.g. active, hidden, archived, unsorted
+  --tag TAG                  Same as --add-tag (repeatable)
+  --tags LIST                Replace all tags (comma-separated)
+  --url URL                  Primary source URL
+  -h, --help                 Show this help
+USAGE
+  parse_opts(
+    $usage, \@args,
+    'dryrun|dry-run'       => \$dryrun,
+    'name=s'               => \$name,
+    'description=s'        => \$description,
+    'description-orig=s'   => \$description_orig,
+    'status=s'             => \$status,
+    'url=s'                => \$url,
+    'add-url=s'            => \@add_urls,
+    'clear-url'            => \$clear_url,
+    'clear-urls'           => \$clear_urls,
+    'source-site=s'        => \$source_site,
+    'source-id=s'          => \$source_id,
+    'design-model-id=s'    => \$design_model_id,
+    'auto-from-url!'       => \$auto_from_url,
+    'tag|add-tag=s'        => \@add_tags,
+    'remove-tag=s'         => \@remove_tags,
+    'tags=s'               => \$tags,
+    'clear-tags'           => \$clear_tags,
+  );
+
+  my $target = shift @args
+    // die "Error: ID or PATH required.\nTry: 3dlib edit --help\n";
+  die "Error: unexpected argument(s): @args\n" if @args;
+
+  my %fields;
+  $fields{name}             = $name             if defined $name;
+  $fields{description}      = _read_text_opt($description)      if defined $description;
+  $fields{description_orig} = _read_text_opt($description_orig) if defined $description_orig;
+  $fields{status}           = $status           if defined $status;
+  $fields{source_url}       = $url              if defined $url;
+  $fields{source_site}      = $source_site      if defined $source_site;
+  $fields{source_id}        = $source_id        if defined $source_id;
+  $fields{design_model_id}  = $design_model_id  if defined $design_model_id;
+  $fields{add_urls}         = \@add_urls        if @add_urls;
+  $fields{clear_url}        = 1                 if $clear_url;
+  $fields{clear_urls}       = 1                 if $clear_urls;
+  $fields{clear_tags}       = 1                 if $clear_tags;
+  $fields{tags_set}         = $tags             if defined $tags;
+  $fields{tags_add}         = \@add_tags        if @add_tags;
+  $fields{tags_remove}      = \@remove_tags     if @remove_tags;
+
+  if (defined $auto_from_url) {
+    $fields{auto_from_url} = $auto_from_url ? 1 : 0;
+  }
+
+  unless (
+       defined $name || defined $description || defined $description_orig
+    || defined $status || defined $url || @add_urls
+    || $clear_url || $clear_urls || $clear_tags
+    || defined $source_site || defined $source_id || defined $design_model_id
+    || defined $tags || @add_tags || @remove_tags
+  ) {
+    die "Error: nothing to change (pass --url, --description, --tag, …).\nTry: 3dlib edit --help\n";
+  }
+
+  ensure_db();
+  my $res = Item::edit(
+    target => $target,
+    dryrun => $dryrun ? 1 : 0,
+    %fields,
+  );
+
+  if ($res->{noop}) {
+    say "No changes for #$res->{id} $res->{name}";
+    return;
+  }
+
+  my $prefix = $res->{dryrun} ? 'would set' : 'set';
+  say(($res->{dryrun} ? 'dryrun ' : '') . "#$res->{id} $res->{name}");
+  for my $k (sort keys $res->{changes}->%*) {
+    my $ch   = $res->{changes}{$k};
+    my $old  = $ch->{old} // '';
+    my $new  = $ch->{new} // '';
+    $old =~ s/\n/\\n/g;
+    $new =~ s/\n/\\n/g;
+    if (length($old) > 80) { $old = substr($old, 0, 77) . '...' }
+    if (length($new) > 80) { $new = substr($new, 0, 77) . '...' }
+    say "  $prefix $k:";
+    say "    - $old" if length $old;
+    say "    + $new" if length $new;
+    say "    + (cleared)" if !length $new && length $old;
+  }
+}
+
+sub cmd_tag {
+  my @args = @_;
+  my ($list, $clear, $dryrun);
+  my (@add, @remove);
+  my $usage = <<'USAGE';
+Usage: 3dlib tag [ID|PATH] [TAG]... [options]
+       3dlib tags
+       3dlib keyword ...
+
+  Catalog keywords/tags (not from Bambu 3MF — those files have no keyword
+  field).  Apply to any item type (3mf, stl, projects, …).
+
+  With no ID: list all tags and counts.
+  With ID and TAG args: add those tags (default).
+
+Examples:
+  3dlib tag 9 clasp jewelry
+  3dlib tag 9 --add clasp --add jewelry
+  3dlib tag 9 --remove clasp
+  3dlib tag 9 --clear
+  3dlib tag 9 --set clasp,jewelry
+  3dlib tags
+  3dlib ls --tag clasp
+
+Options:
+  --add TAG             Add tag (repeatable)
+  --clear               Remove all tags from the item
+  --dryrun, --dry-run   Show changes only
+  --list                List all tags (default when no ID)
+  --remove TAG          Remove tag (repeatable)
+  --set LIST            Replace all tags (comma-separated)
+  -h, --help            Show this help
+USAGE
+  my $set;
+  parse_opts(
+    $usage, \@args,
+    'list'             => \$list,
+    'add=s'            => \@add,
+    'remove=s'         => \@remove,
+    'clear'            => \$clear,
+    'set=s'            => \$set,
+    'dryrun|dry-run'   => \$dryrun,
+  );
+
+  # Bare "3dlib tags" or --list
+  if ($list || !@args) {
+    ensure_db();
+    my $rows = DB::list_tags();
+    if (!$rows->@*) {
+      say "No tags yet. Add some with: 3dlib tag ID clasp";
+      return;
+    }
+    for my $r ($rows->@*) {
+      printf "%5d  %s\n", $r->{count}, $r->{tag};
+    }
+    say scalar($rows->@*), " tag(s)";
+    return;
+  }
+
+  my $target = shift @args;
+  # Remaining bare args are tags to add
+  push @add, @args if @args;
+
+  ensure_db();
+  my %fields = (target => $target, dryrun => $dryrun ? 1 : 0);
+  $fields{clear_tags}  = 1 if $clear;
+  $fields{tags_set}    = $set if defined $set;
+  $fields{tags_add}    = \@add if @add;
+  $fields{tags_remove} = \@remove if @remove;
+
+  unless ($clear || defined $set || @add || @remove) {
+    # No change ops: show current tags for the item
+    my $item = Item::load($target) // die "Not found: $target\n";
+    my $tags = DB::get_item_tags($item->id);
+    say "#", $item->id, " ", $item->name;
+    say "tags: ", ($tags->@* ? join(', ', $tags->@*) : '(none)');
+    return;
+  }
+
+  my $res = Item::edit(%fields);
+  if ($res->{noop}) {
+    say "No changes for #$res->{id} $res->{name}";
+    return;
+  }
+  my $prefix = $res->{dryrun} ? 'would set' : 'set';
+  say(($res->{dryrun} ? 'dryrun ' : '') . "#$res->{id} $res->{name}");
+  for my $k (sort keys $res->{changes}->%*) {
+    my $ch  = $res->{changes}{$k};
+    my $old = $ch->{old} // '';
+    my $new = $ch->{new} // '';
+    say "  $prefix $k:";
+    say "    - $old" if length $old;
+    say "    + $new" if length $new;
+    say "    + (cleared)" if !length $new && length $old;
+  }
+}
+
+# Support --description=text, --description=@file, --description=-
+sub _read_text_opt {
+  my ($v) = @_;
+  return $v unless defined $v;
+  if ($v eq '-') {
+    local $/;
+    my $t = <STDIN>;
+    return defined $t ? $t : '';
+  }
+  if ($v =~ /^@(.*)\z/s) {
+    my $path = $1;
+    die "Error: empty path after @ in text option\n" unless length $path;
+    open my $fh, '<:encoding(UTF-8)', $path
+      or die "Error: cannot read $path: $!\n";
+    local $/;
+    my $t = <$fh>;
+    close $fh;
+    return defined $t ? $t : '';
+  }
+  return $v;
 }
 
 sub cmd_scan {
@@ -308,14 +590,17 @@ Usage: 3dlib ls [options]
   List catalog items (most recently modified first).
 
 Options:
-  --type T        Filter by type (3mf, stl, step, fcstd, mixed, ...)
   --kind K        Filter by kind (file, project)
-  --status S      Filter by status (active, unsorted, ...)
-  --no-thumb      Only items missing a thumbnail
-  --no-source     Only items missing a source URL
   --limit N       Max rows (default 100)
+  --no-source     Only items missing a source URL
+  --no-tags       Only items with no keywords/tags
+  --no-thumb      Only items missing a thumbnail
+  --status S      Filter by status (active, unsorted, ...)
+  --tag T         Filter by keyword/tag (repeatable; AND)
+  --type T        Filter by type (3mf, stl, step, fcstd, mixed, ...)
   -h, --help      Show this help
 USAGE
+  my @tags;
   parse_opts(
     $usage, \@args,
     'type=s'    => \$o{type},
@@ -323,8 +608,11 @@ USAGE
     'status=s'  => \$o{status},
     'no-thumb'  => \$o{no_thumb},
     'no-source' => \$o{no_source},
+    'no-tags'   => \$o{no_tags},
+    'tag=s'     => \@tags,
     'limit=i'   => \$o{limit},
   );
+  $o{tags} = \@tags if @tags;
   die "Error: unexpected argument(s): @args\n" if @args;
 
   $o{limit} //= 100;
@@ -335,15 +623,26 @@ USAGE
 
 sub cmd_describe {
   my @args = @_;
+  my $view;
   my $usage = <<'USAGE';
-Usage: 3dlib describe ID|PATH
+Usage: 3dlib describe ID|PATH [options]
 
   Show full catalog details for one item.
+  Use --view (or the show command) to open the thumbnail in an image viewer.
 
 Options:
-  -h, --help    Show this help
+  --view            Open thumbnail after printing details
+  --no-view         Never open viewer (default for describe)
+  -h, --help        Show this help
+
+Image viewer (for --view / show):
+  THREEDLIB_IMAGE_VIEWER, config image_viewer, or tools.image_viewer
+  Default: feh
 USAGE
-  parse_opts($usage, \@args);
+  parse_opts(
+    $usage, \@args,
+    'view!' => \$view,
+  );
 
   my $id = shift @args
     // die "Error: ID or PATH required.\nTry: 3dlib describe --help\n";
@@ -352,6 +651,84 @@ USAGE
   ensure_db();
   my $item = Item::load($id) // die "Not found: $id\n";
   $item->describe_to(*STDOUT);
+  _open_item_thumb($item->id) if $view;
+}
+
+sub cmd_show {
+  my @args = @_;
+  my $no_view;
+  my $usage = <<'USAGE';
+Usage: 3dlib show ID|PATH [options]
+       3dlib inspect ID|PATH
+       3dlib view ID|PATH
+
+  Print catalog details for one item and open its thumbnail in an image
+  viewer (default: feh).  Generates a missing/stale thumb when possible.
+
+Options:
+  --no-view         Print details only (same as describe)
+  --thumb-only      Open viewer without printing details
+  -h, --help        Show this help
+
+Image viewer:
+  export THREEDLIB_IMAGE_VIEWER='feh -.'
+  # or in config.json:  "image_viewer": "feh"
+  # or:  "tools": { "image_viewer": "imv" }
+USAGE
+  my $thumb_only = 0;
+  parse_opts(
+    $usage, \@args,
+    'no-view'    => \$no_view,
+    'thumb-only' => \$thumb_only,
+  );
+
+  my $id = shift @args
+    // die "Error: ID or PATH required.\nTry: 3dlib show --help\n";
+  die "Error: unexpected argument(s): @args\n" if @args;
+
+  ensure_db();
+  my $item = Item::load($id) // die "Not found: $id\n";
+  $item->describe_to(*STDOUT) unless $thumb_only;
+  _open_item_thumb($item->id) unless $no_view;
+}
+
+# Ensure thumb exists if possible, then launch the configured image viewer.
+sub _open_item_thumb {
+  my ($id) = @_;
+  require Thumbs;
+  try {
+    Thumbs::ensure_item_thumb($id);
+  }
+  catch ($e) {
+    warn "thumb generate: $e\n";
+  }
+
+  my $row = DB::get_item($id) or die "Not found: $id\n";
+  my $thumb = $row->{thumb_path};
+  if (!$thumb || !-f $thumb) {
+    my $cand = LibConfig::thumbs_dir() . "/$id.png";
+    $thumb = $cand if -f $cand;
+  }
+  die "No thumbnail for #$id ($row->{name}). Try: 3dlib thumbs $id --force\n"
+    unless $thumb && -f $thumb;
+
+  my $viewer = LibConfig::image_viewer();
+  # Allow extra args in the viewer string, e.g. "feh -." or "imv -f"
+  my @cmd = split /\s+/, $viewer;
+  @cmd = ('feh') unless @cmd;
+  push @cmd, $thumb;
+
+  say "viewer: @cmd";
+  my $rc = system(@cmd);
+  if ($rc == -1) {
+    die "Failed to run image viewer '$viewer': $!\n"
+      . "Install feh or set THREEDLIB_IMAGE_VIEWER / image_viewer in config.\n";
+  }
+  if ($rc != 0) {
+    my $code = $rc >> 8;
+    warn "Image viewer exited $code\n";
+  }
+  return 1;
 }
 
 sub cmd_thumbs {
@@ -377,10 +754,10 @@ Examples:
 
 Options:
   --force           Regenerate even if thumb is newer than the source
-  --missing         Legacy alias (default already includes missing/stale)
   --limit N         Max items when scanning the catalog (default 5000)
-  -v, --verbose     Print each item
+  --missing         Legacy alias (default already includes missing/stale)
   -h, --help        Show this help
+  -v, --verbose     Print each item
 USAGE
   parse_opts(
     $usage, \@args,
@@ -441,26 +818,33 @@ USAGE
 
 sub cmd_run {
   my @args = @_;
-  my ($dryrun, $no_import);
+  my ($dryrun, $no_import, $app);
   my $usage = <<'USAGE';
 Usage: 3dlib run TARGET [options]
        3dlib open TARGET [options]
 
-  Resolve TARGET, optionally import into /share/3d, then open in Bambu Studio.
-  Also used as the bambustudio:// URL handler (see install-handler).
+  Resolve TARGET, optionally import into /share/3d, then open in an app.
+  Default app is Bambu Studio.  Also used as the bambustudio:// handler.
 
 TARGET:
   local path, catalog ID, MakerWorld https URL, or bambustudio:// deep link
 
 Options:
-  --dryrun, --dry-run   Describe only; do not import or launch Studio
+  --app studio|freecad  Application to launch (default: studio)
+  --dryrun, --dry-run   Describe only; do not import or launch
   --no-import           Open without importing into the library
   -h, --help            Show this help
+
+FreeCAD config (config.json or env):
+  freecad / THREEDLIB_FREECAD       e.g. "ssh -Y tomoon freecad"
+  freecad_shell / THREEDLIB_FREECAD_SHELL=1   use /bin/sh -c for complex commands
+  Use {file} in the command for the path, or it is appended as the last arg.
 USAGE
   parse_opts(
     $usage, \@args,
     'dryrun|dry-run' => \$dryrun,
     'no-import'      => \$no_import,
+    'app=s'          => \$app,
   );
 
   my $target = shift @args
@@ -472,6 +856,7 @@ USAGE
     target    => $target,
     dryrun    => $dryrun ? 1 : 0,
     no_import => $no_import ? 1 : 0,
+    app       => $app // 'studio',
   );
 }
 
@@ -485,8 +870,8 @@ Usage: 3dlib serve [options]
   Ctrl-C stops; Ctrl-\\ (SIGQUIT) restarts and reloads code.
 
 Options:
-  --port N      Port (default 31353)
   --bind ADDR   Bind address (default 0.0.0.0)
+  --port N      Port (default 31353)
   -h, --help    Show this help
 USAGE
   parse_opts(
@@ -592,28 +977,38 @@ sub cmd_translate {
   my $usage = <<'USAGE';
 Usage: 3dlib translate [ID|PATH]... [options]
 
-  Translate Chinese (CJK) catalog descriptions to English via an
+  Translate non-English catalog names and descriptions to English via an
   OpenAI-compatible API (OpenAI ChatGPT or xAI Grok).
+
+  Detects CJK, German/French/etc. (diacritics or common words), and other
+  scripts.  Pure-ASCII German (no umlauts) is included via word heuristics.
+  Originals are kept in name_orig / description_orig (files on disk are not
+  renamed).  description_orig is hidden in the web UI by default.
 
   Uses OPENAI_API_KEY by default (model gpt-4o-mini).  For Grok:
     export XAI_API_KEY=...
     and set in /share/3d/.library/config.json:
       "translate": { "provider": "xai", "model": "grok-3-mini" }
 
-  With no IDs: translate all items whose description still contains CJK.
-  Original text is kept in description_orig.
+  Detection mode (config translate.detect):
+    auto  — non-English including CJK + European languages (default)
+    cjk   — Chinese/Japanese/Korean only (old behavior)
+
+  With no IDs: translate all items whose description still looks non-English.
+  New imports auto-translate when translate.auto_import is on (default).
 
 Examples:
-  3dlib translate 8 -v
+  3dlib translate -v
   3dlib translate --dryrun
+  3dlib translate 14 -v
   3dlib translate --force 8
 
 Options:
-  --force           Re-translate even if already done
-  --dryrun          Show what would be translated
-  --limit N         Max items when scanning (default 5000)
-  -v, --verbose     Print each item
-  -h, --help        Show this help
+  --dryrun              Show what would be translated
+  --force               Re-translate even if already done
+  --limit N             Max items when scanning (default 5000)
+  -h, --help            Show this help
+  -v, --verbose         Print each item
 USAGE
   parse_opts(
     $usage, \@args,
@@ -653,30 +1048,18 @@ USAGE
     parse_opts($usage, \@args);
   }
 
+  print "3dlib - personal 3D model library under /share/3d\n\n";
+  print "Usage:\n  3dlib <command> [options]\n\n";
+  print "Commands:\n";
+  for my $row (sort { $a->[0] cmp $b->[0] } @COMMAND_HELP) {
+    printf "  %-18s %s\n", $row->[0], $row->[1];
+  }
   print <<'EOF';
-3dlib - personal 3D model library under /share/3d
 
-Usage:
-  3dlib <command> [options]
+Aliases: rm=delete, search=query, list=ls, open=run, handler=install-handler,
+         inspect=show, view=show, tags=tag, keyword=tag, keywords=tag
 
-Commands:
-  init              Create library dirs + empty database
-  import PATH       Import file/dir/zip into /share/3d
-  delete ID|PATH    Remove catalog entry (and files under /share/3d)
-  scan              Catalog files already under /share/3d
-  query TEXT        Full-text search
-  ls                List items
-  describe ID|PATH  Show one item in detail
-  thumbs            Generate missing thumbs (3MF / photos / mesh-preview)
-  stats             Counts and coverage
-  run TARGET        Import (optional) + open in Bambu Studio
-  serve             Web UI on port 31353
-  install-handler   Register bambustudio:// handler
-  repair-encoding   Fix UTF-8 mojibake in catalog fields
-  translate         Translate CJK descriptions via OpenAI/Grok API
-  help [COMMAND]    This help, or subcommand help
-
-Run "3dlib <command> --help" for details on any command.
+Run "3dlib <command> --help" for details on any command (options listed sorted).
 
 Import defaults to MOVE into /share/3d (use --copy to leave source).
 Delete also removes library files unless --keep-files.
@@ -690,9 +1073,13 @@ EOF
 }
 
 sub _print_items ($items) {
+  DB::attach_tags($items) if $items;
   for my $row ($items->@*) {
     my \%it = $row;
-    printf "#%-5d %-8s %-6s  %s\n  %s\n  mtime %s  %s\n\n",
+    my $tags = $it{tags} && ref $it{tags} eq 'ARRAY' && $it{tags}->@*
+      ? join(', ', $it{tags}->@*)
+      : '';
+    printf "#%-5d %-8s %-6s  %s\n  %s\n  mtime %s  %s\n",
       $it{id},
       $it{kind} // '',
       $it{type} // '',
@@ -700,11 +1087,14 @@ sub _print_items ($items) {
       $it{path} // '',
       fmt_time($it{mtime}),
       $it{source_url} // '';
+    say "  tags: $tags" if length $tags;
+    say '';
   }
   say scalar($items->@*), " item(s)";
 }
 
-sub _print_results ($res) {
+sub _print_results ($res, %o) {
+  my $quiet = $o{quiet} // 0;
   $res = [$res] unless ref $res eq 'ARRAY';
   for my $row ($res->@*) {
     my \%r = $row;
@@ -712,8 +1102,63 @@ sub _print_results ($res) {
     my $id  = $r{item_id} // '-';
     say "[$act] #$id ", ($r{source} // ''), " -> ", ($r{dest} // '');
     say "        ", $r{reason} if $r{reason};
+
+    next if $quiet;
+    next unless defined $r{item_id} && $r{item_id} =~ /^\d+$/;
+
+    my $it = eval { DB::get_item($r{item_id}) };
+    if ($it) {
+      _print_import_detail($it, \%r);
+    }
+    else {
+      # Dry-run / pre-catalog fields from the import result itself
+      for my $k (qw(name type source_url design_model_id)) {
+        next unless defined $r{$k} && length $r{$k};
+        printf "  %-12s %s\n", "$k:", $r{$k};
+      }
+    }
+    say '';
   }
   say scalar($res->@*), " result(s)";
+}
+
+sub _print_import_detail {
+  my ($it, $r) = @_;
+  $r //= {};
+  printf "  %-12s %s\n", 'name:',   $it->{name} // '';
+  printf "  %-12s %s / %s\n", 'kind/type:', $it->{kind} // '', $it->{type} // ($r->{type} // '');
+  printf "  %-12s %s\n", 'path:',   $it->{path} // ($r->{dest} // '');
+  printf "  %-12s %s\n", 'status:', $it->{status} // '';
+  if ($it->{tags} && $it->{tags}->@*) {
+    printf "  %-12s %s\n", 'tags:', join(', ', $it->{tags}->@*);
+  }
+  if ($it->{source_url}) {
+    printf "  %-12s %s\n", 'source:', $it->{source_url};
+    printf "  %-12s %s\n", 'site:',   $it->{source_site}
+      if $it->{source_site};
+  }
+  printf "  %-12s %s\n", 'design_id:', $it->{design_model_id}
+    if $it->{design_model_id};
+  printf "  %-12s %s\n", 'size:', human_size($it->{size_bytes})
+    if defined $it->{size_bytes};
+  printf "  %-12s %s\n", 'mtime:', fmt_time($it->{mtime})
+    if $it->{mtime};
+
+  my $thumb = $it->{thumb_path};
+  if (!$thumb || !-f $thumb) {
+    my $cand = LibConfig::thumbs_dir() . "/$it->{id}.png";
+    $thumb = $cand if -f $cand;
+  }
+  printf "  %-12s %s\n", 'thumb:',
+    ($thumb && -f $thumb) ? $thumb : '(none)';
+
+  if (defined $it->{description} && length $it->{description}) {
+    my $d = $it->{description};
+    $d =~ s/\s+/ /g;
+    $d = substr($d, 0, 200) . '…' if length $d > 200;
+    printf "  %-12s %s\n", 'desc:', $d;
+  }
+  say "  (existing catalog entry)" if $r->{existing};
 }
 
 __END__

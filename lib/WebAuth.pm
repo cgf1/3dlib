@@ -231,4 +231,16 @@ sub can_download {
   return defined $role;
 }
 
+# Settings / config.json editing — admin only (includes local admin).
+sub can_settings {
+  my ($role) = @_;
+  return defined $role && $role eq 'admin';
+}
+
+# Edit item metadata (name, URLs, description, …) — same policy as delete.
+sub can_edit {
+  my ($role) = @_;
+  return can_delete($role);
+}
+
 1;

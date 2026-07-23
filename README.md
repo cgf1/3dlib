@@ -34,7 +34,56 @@ man 3dlib
 3dlib init
 3dlib import PATH [--dryrun] [--copy|--move] [--clean]
 3dlib delete ID|PATH [--dryrun] [--keep-files]
+3dlib edit ID|PATH --url URL [--description TEXT] [--name TEXT] …
+3dlib show ID|PATH          # details + open thumbnail (feh by default)
+3dlib import PATH           # detailed summary (use -q for one-liners)
+3dlib tag 9 clasp jewelry   # keywords (catalog-side; not in Bambu 3MF)
+3dlib ls --tag clasp
+3dlib tags                  # list all tags
 3dlib serve
+```
+
+Thumbnail viewer for `show` / `describe --view`:
+
+```bash
+export THREEDLIB_IMAGE_VIEWER='feh -.'   # or imv, sxiv, …
+# config.json: "image_viewer": "feh"
+```
+
+### Launch apps (web + CLI)
+
+Web item page: **Open in Bambu Studio** (3mf) and **Open in FreeCAD** (fcstd) stay on
+the page and show “Launched …”. CLI:
+
+```bash
+3dlib run 9                    # Bambu Studio (default)
+3dlib run 9 --app freecad      # FreeCAD
+```
+
+FreeCAD on another host (e.g. `tomoon`), when `/share/3d` is the same path there
+(NFS/bind mount):
+
+```json
+{
+  "bambu_studio": "/usr/local/bin/bambu-studio",
+  "freecad": "ssh -Y tomoon freecad",
+  "freecad_shell": false
+}
+```
+
+| Key / env | Purpose |
+|-----------|---------|
+| `freecad` / `THREEDLIB_FREECAD` | Command; `{file}` = path, or path is appended |
+| `freecad_shell` / `THREEDLIB_FREECAD_SHELL=1` | Run via `/bin/sh -c` for complex quoting |
+| `bambu_studio` | Bambu Studio binary |
+
+Examples:
+
+```text
+freecad
+ssh -Y tomoon freecad
+ssh -Y tomoon freecad {file}
+ssh -Y tomoon 'freecad {file}'     # with freecad_shell: true
 ```
 
 ### Web UI (LAN family use)
@@ -71,7 +120,9 @@ Config alternative under `/share/3d/.library/config.json`:
 }
 ```
 
-UI features when allowed: **Download** on item pages, multi-select checkboxes on the gallery, bulk **Download** (zip) and **Delete**.
+UI features when allowed: **Download** on item pages, multi-select checkboxes on the gallery, bulk **Download** (zip) and **Delete**. Admins can **Edit** an item to set name, description, primary/additional source URLs, site ids, and status (metadata only; does not move files).
+
+**Settings** (header link, admin / local admin only): form editor for `/share/3d/.library/config.json` — library paths, web passwords, local admin, translation API. Secrets are write-only (leave blank to keep). Advanced section edits raw JSON.
 
 ### Mesh previews (STL / STEP / …)
 
@@ -100,27 +151,37 @@ python3 -m venv /usr/local/3dlib/venv-mesh
 
 ### Description translation (OpenAI / Grok)
 
-Chinese (CJK) descriptions can be translated via an OpenAI-compatible API.
+Non-English catalog **names and descriptions** (Chinese, German, French, Italian,
+Spanish, …) are translated via an OpenAI-compatible API. Detection covers CJK,
+letters with diacritics (äöüß, …), other scripts, and common non-English function
+words even in pure ASCII. Originals are stored in `name_orig` / `description_orig`
+(files on disk are not renamed). `description_orig` is hidden in the web UI.
 
 ```bash
-# Uses OPENAI_API_KEY + gpt-4o-mini by default
-3dlib translate 8 -v
-3dlib translate            # all items still containing CJK
+3dlib translate -v              # all non-English names/descriptions
+3dlib translate 14 -v           # one item
+3dlib translate --dryrun        # preview first
 ```
 
-For xAI Grok, put in `/share/3d/.library/config.json`:
+Config (`/share/3d/.library/config.json`):
 
 ```json
 {
   "translate": {
     "provider": "xai",
-    "model": "grok-3-mini",
+    "model": "grok-latest",
     "api_key_env": "XAI_API_KEY",
-    "auto_import": true
+    "auto_import": true,
+    "detect": "auto"
   }
 }
 ```
 
-`auto_import` (default true) translates on import when a key is present. Original text is kept in `description_orig`.
+| `detect` | Meaning |
+|----------|---------|
+| `auto` (default) | Any non-English (CJK + European languages + …) |
+| `cjk` | Chinese/Japanese/Korean only (old behavior) |
+
+`auto_import` (default true) runs the same detection on every import when an API key is available.
 
 When you change CLI behavior, update `man/3dlib.1` in the same change.
