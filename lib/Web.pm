@@ -27,6 +27,10 @@ sub serve {
   my $host = $o{bind} // $cfg->{bind} // '0.0.0.0';
   my $port = $o{port} // $cfg->{port} // 31353;
 
+  # Make ps(1) show "/usr/local/bin/3dlib serve …" instead of
+  # "/usr/bin/perl /usr/local/bin/3dlib serve …" (Linux $0 magic).
+  _set_process_title('serve', '--bind', $host, '--port', $port);
+
   my $d = HTTP::Daemon->new(
     LocalAddr => $host,
     LocalPort => $port,
@@ -129,6 +133,17 @@ sub serve {
     my @cmd = ($bin, 'serve', '--bind', $host, '--port', $port);
     exec @cmd or die "exec @cmd failed: $!\n";
   }
+}
+
+# Rewrite process title for ps/top (Linux updates /proc/self/cmdline via $0).
+sub _set_process_title {
+  my (@args) = @_;
+  my $prog =
+      (-x '/usr/local/bin/3dlib') ? '/usr/local/bin/3dlib'
+    : (defined $0 && $0 =~ m{/3dlib(?:\z|\s)} ) ? (split /\s+/, $0, 2)[0]
+    : '/usr/local/bin/3dlib';
+  # Single string is what ps auwwwx displays as the command line.
+  $0 = join(' ', $prog, @args);
 }
 
 sub _handle {
