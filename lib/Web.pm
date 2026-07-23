@@ -122,7 +122,7 @@ sub serve {
   }
 
   if ($restart) {
-    say ($restart_sig || 'signal'), ": restarting 3dlib serve...";
+    say(($restart_sig || 'signal') . ": restarting 3dlib serve...");
     eval { $d->close };
     # Drop children still finishing requests (they'll exit on their own)
     my $bin = $o{reexec} // $ENV{THREEDLIB_BIN} // '/usr/local/bin/3dlib';
