@@ -98,8 +98,18 @@ my %EN_WORDS = map { $_ => 1 } qw(
   last modified description assembly support supports
 );
 
+# Strong non-English content words (nouns/adjectives). One hit is enough for
+# short titles like Verschluss_paracord.3mf after underscore-splitting.
+my %OTHER_STRONG = map { $_ => 1 } qw(
+  verschluss klickverschluss verbindung armband armbaender armbander
+  universell universelle speziell entwickelt sichere sicherer
+  drehen verschieben werkzeug klickverschluss klick
+  collana collane chiusura gancio semplice
+  fermoir bracelet
+);
+
 my %OTHER_WORDS = map { $_ => 1 } (
-  # German
+  # German function / content words
   qw(
     der die das und für fur mit zum zur eine einer eines einem einen nicht
     oder sowie wird wurde werden sind auch bei von den dem des ein ist
@@ -107,7 +117,7 @@ my %OTHER_WORDS = map { $_ => 1 } (
     sicherer verbindung armbänder armbander verschluss klickverschluss
     universell universelle um zu einer als auf im in am nach noch nur
     kann können konnen wird wurden wurden hat haben man sie wir
-    paracord klick drehen verschieben werkzeug
+    klick drehen verschieben werkzeug
   ),
   # French
   qw(
@@ -132,20 +142,24 @@ my %OTHER_WORDS = map { $_ => 1 } (
   qw(
     para com uma dos das este esta são sao por sem como mais
   ),
+  keys %OTHER_STRONG,
 );
 
 sub _word_lang_scores {
   my ($s) = @_;
-  my ($en, $other) = (0, 0);
+  my ($en, $other, $strong) = (0, 0, 0);
   # Strip catalog boilerplate lines that are already English labels
   my $body = $s;
   $body =~ s{^(Designer|License|Source|Last modified|DesignModelId)\s*:.*$}{}gmi;
+  # Split on non-letters so Verschluss_paracord and foo-bar become tokens
+  $body =~ s/[^A-Za-z]+/ /g;
   for my $w ($body =~ /\b([A-Za-z]{2,})\b/g) {
     my $lw = lc $w;
-    $en++    if $EN_WORDS{$lw};
-    $other++ if $OTHER_WORDS{$lw};
+    $en++     if $EN_WORDS{$lw};
+    $other++  if $OTHER_WORDS{$lw};
+    $strong++ if $OTHER_STRONG{$lw};
   }
-  return ($en, $other);
+  return ($en, $other, $strong);
 }
 
 # True if catalog text should be sent through the translation API.
@@ -165,7 +179,9 @@ sub needs_translation {
   return 1 if has_non_latin_or_diacritics($text);
 
   # Pure ASCII: function-word heuristic (German without umlauts, etc.)
-  my ($en, $other) = _word_lang_scores($text);
+  my ($en, $other, $strong) = _word_lang_scores($text);
+  # One strong non-English content word is enough (short filenames)
+  return 1 if $strong >= 1 && $strong >= $en;
   return 1 if $other >= 3 && $other > $en;
   return 1 if $other >= 2 && $en == 0 && length($text) > 40;
   return 1 if $other >= 2 && $other >= $en + 2;
@@ -329,7 +345,13 @@ sub rename_item_on_disk {
 
   my $new = "$parent/$new_base";
   if ($old_base eq $new_base || $old eq $new) {
-    dry_print($dryrun, "rename #$item_id: path already English ($old_base)");
+    if (needs_translation($old_base)) {
+      dry_print($dryrun,
+        "rename #$item_id: path still non-English; translate name first ($old_base)");
+    }
+    else {
+      dry_print($dryrun, "rename #$item_id: path already matches catalog name ($old_base)");
+    }
     return 0;
   }
 
