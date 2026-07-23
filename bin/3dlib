@@ -867,7 +867,7 @@ sub cmd_serve {
 Usage: 3dlib serve [options]
 
   Start the local web UI (gallery, item detail, STL viewer, Open in Studio).
-  Ctrl-C stops; Ctrl-\\ (SIGQUIT) restarts and reloads code.
+  Ctrl-C stops; SIGHUP or SIGQUIT (Ctrl-\\) re-execs and reloads code.
 
 Options:
   --bind ADDR   Bind address (default 0.0.0.0)

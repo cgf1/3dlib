@@ -169,8 +169,12 @@ Start the local web UI (default port
 .BR 31353 ).
 .B Ctrl-C
 stops;
-.B Ctrl-\\
-(SIGQUIT) restarts the server and reloads code.
+.B SIGHUP
+or
+.B SIGQUIT
+.RB ( Ctrl-\\ )
+re-execs the process and reloads code (same PID; safe for OpenRC/systemd
+.BR reload ).
 Optional password protection for LAN family use (do
 .B not
 port-forward to the internet):

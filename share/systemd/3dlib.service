@@ -1,0 +1,46 @@
+# systemd unit for 3dlib web UI (example for non-Gentoo systems).
+#
+# Install:
+#   sudo cp share/systemd/3dlib.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now 3dlib
+#
+# Reload code after git pull / edits (re-exec, same PID):
+#   sudo systemctl reload 3dlib
+#
+# Do not expose this service to the public internet.
+
+[Unit]
+Description=3dlib 3D model library web UI
+Documentation=man:3dlib(1)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Run as a normal user that can read/write the library (not root).
+User=cgf
+Group=cgf
+WorkingDirectory=/share/3d
+
+# Optional env (passwords, API keys, FreeCAD remote launch, …)
+# EnvironmentFile=-/etc/3dlib.env
+# Environment=THREEDLIB_WEB_PASSWORD=
+# Environment=THREEDLIB_WEB_ADMIN_PASSWORD=
+# Environment=THREEDLIB_ROOT=/share/3d
+
+ExecStart=/usr/local/bin/3dlib serve --bind 0.0.0.0 --port 31353
+# Re-exec serve so Perl modules reload (Web.pm handles SIGHUP).
+ExecReload=/bin/kill -HUP $MAINPID
+
+Restart=on-failure
+RestartSec=2
+# Allow binding only; serve does not need elevated caps if port > 1024.
+NoNewPrivileges=true
+
+# Logs go to journal; 3dlib also may write /tmp/3dlib-*.log for launched apps.
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

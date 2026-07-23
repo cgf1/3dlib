@@ -1,0 +1,84 @@
+#!/sbin/openrc-run
+# Copyright 2026
+# Distributed under the terms of the GNU General Public License v2
+#
+# Gentoo OpenRC init script for 3dlib serve.
+#
+# Install on ednor (or any OpenRC host):
+#   sudo cp /usr/local/3dlib/share/openrc/3dlib /etc/init.d/3dlib
+#   sudo chmod 755 /etc/init.d/3dlib
+#   sudo cp /usr/local/3dlib/share/openrc/3dlib.conf /etc/conf.d/3dlib
+#   # edit /etc/conf.d/3dlib
+#   sudo rc-update add 3dlib default
+#   sudo rc-service 3dlib start
+#
+# Reload code after edits (SIGHUP → re-exec, same PID):
+#   sudo rc-service 3dlib reload
+#
+# Do not expose this service to the public internet.
+
+name="3dlib"
+description="3dlib 3D model library web UI"
+
+: ${THREEDLIB_BIN:=/usr/local/bin/3dlib}
+: ${THREEDLIB_BIND:=0.0.0.0}
+: ${THREEDLIB_PORT:=31353}
+: ${THREEDLIB_USER:=cgf}
+: ${THREEDLIB_GROUP:=cgf}
+: ${THREEDLIB_PIDFILE:=/run/${RC_SVCNAME}.pid}
+: ${THREEDLIB_LOG:=/var/log/3dlib-serve.log}
+
+command="${THREEDLIB_BIN}"
+command_args="serve --bind ${THREEDLIB_BIND} --port ${THREEDLIB_PORT}"
+command_user="${THREEDLIB_USER}:${THREEDLIB_GROUP}"
+command_background=true
+pidfile="${THREEDLIB_PIDFILE}"
+
+# OpenRC will redirect stdout/stderr when these are set (OpenRC 0.21+).
+output_log="${THREEDLIB_LOG}"
+error_log="${THREEDLIB_LOG}"
+
+extra_started_commands="reload"
+
+depend() {
+	need net localmount
+	after bootmisc
+	use dns logger
+}
+
+checkconfig() {
+	if [ ! -x "${THREEDLIB_BIN}" ]; then
+		eerror "${THREEDLIB_BIN} is missing or not executable"
+		return 1
+	fi
+	if ! getent passwd "${THREEDLIB_USER}" >/dev/null 2>&1; then
+		eerror "User ${THREEDLIB_USER} does not exist (edit /etc/conf.d/3dlib)"
+		return 1
+	fi
+	if ! getent group "${THREEDLIB_GROUP}" >/dev/null 2>&1; then
+		eerror "Group ${THREEDLIB_GROUP} does not exist (edit /etc/conf.d/3dlib)"
+		return 1
+	fi
+	return 0
+}
+
+start_pre() {
+	checkconfig || return $?
+	checkpath --file --owner "${THREEDLIB_USER}:${THREEDLIB_GROUP}" \
+		--mode 0644 "${THREEDLIB_LOG}" 2>/dev/null || true
+}
+
+stop_pre() {
+	# On "restart", refuse to stop if the binary vanished / config is broken.
+	if [ "${RC_CMD}" = "restart" ]; then
+		checkconfig || return $?
+	fi
+}
+
+# Re-exec serve so Perl code reloads. PID is preserved (exec).
+reload() {
+	checkconfig || return $?
+	ebegin "Reloading ${name} (SIGHUP → re-exec)"
+	start-stop-daemon --signal HUP --pidfile "${pidfile}"
+	eend $?
+}

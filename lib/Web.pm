@@ -58,7 +58,7 @@ sub serve {
   else {
     say "Local admin: off (THREEDLIB_WEB_LOCAL_ADMIN=0)";
   }
-  say "Ctrl-C to stop; Ctrl-\\ (SIGQUIT) to restart.";
+  say "Ctrl-C to stop; SIGHUP or SIGQUIT (Ctrl-\\) reloads code (re-exec).";
   say "Note: for LAN family use only — do not port-forward to the internet.";
 
   # Reap children; HTTP::Daemon is single-threaded, so we fork per connection
@@ -67,9 +67,15 @@ sub serve {
     1 while waitpid(-1, WNOHANG) > 0;
   };
 
-  # Ctrl-\ / SIGQUIT → graceful re-exec (reload code without losing the terminal job)
+  # SIGHUP / SIGQUIT → graceful re-exec (reload Perl code; same PID for OpenRC/systemd)
   my $restart = 0;
-  local $SIG{QUIT} = sub { $restart = 1; };
+  my $restart_sig = '';
+  my $request_restart = sub ($name) {
+    $restart     = 1;
+    $restart_sig = $name;
+  };
+  local $SIG{HUP}  = sub { $request_restart->('SIGHUP') };
+  local $SIG{QUIT} = sub { $request_restart->('SIGQUIT') };
 
   while (!$restart) {
     my $c = $d->accept;
@@ -90,7 +96,8 @@ sub serve {
       # Do NOT close $d — HTTP::Daemon::ClientConn calls $daemon->url
       # (sockhost/sockport) while parsing each request; closing the listen
       # socket makes those undef and spam warnings.
-      local $SIG{QUIT} = 'DEFAULT';    # only the parent restarts
+      local $SIG{HUP}  = 'DEFAULT';    # only the parent restarts
+      local $SIG{QUIT} = 'DEFAULT';
       DB::reconnect();
       try {
         while (my $r = $c->get_request) {
@@ -115,7 +122,7 @@ sub serve {
   }
 
   if ($restart) {
-    say "SIGQUIT: restarting 3dlib serve...";
+    say ($restart_sig || 'signal'), ": restarting 3dlib serve...";
     eval { $d->close };
     # Drop children still finishing requests (they'll exit on their own)
     my $bin = $o{reexec} // $ENV{THREEDLIB_BIN} // '/usr/local/bin/3dlib';
@@ -523,7 +530,7 @@ sub _page_settings {
   elsif ($saved) {
     $banner = qq{<div class="banner ok">Settings saved to <code>}
       . _esc($path)
-      . qq{</code>. Bind/port changes need a serve restart (Ctrl-\\ or restart the process). Web password and translation apply on the next request.</div>};
+      . qq{</code>. Bind/port changes need a serve reload (SIGHUP/SIGQUIT or service reload). Web password and translation apply on the next request.</div>};
   }
 
   my $pw_fam = _secret_set($web->{password})

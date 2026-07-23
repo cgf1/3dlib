@@ -10,6 +10,8 @@ Personal 3D model library manager for `/share/3d`.
   lib/*.pm                 # Perl modules
   man/3dlib.1              # man page (keep in sync with CLI)
   share/applications/      # desktop entry template
+  share/openrc/            # Gentoo OpenRC init + conf.d
+  share/systemd/           # systemd unit (example)
 
 /usr/local/bin/3dlib                    -> bin/3dlib
 /usr/local/share/man/man1/3dlib.1       -> man/3dlib.1
@@ -24,6 +26,35 @@ Personal 3D model library manager for `/share/3d`.
 ln -sfn /usr/local/3dlib/bin/3dlib /usr/local/bin/3dlib
 ln -sfn /usr/local/3dlib/man/3dlib.1 /usr/local/share/man/man1/3dlib.1
 ln -sfn /usr/local/3dlib/lib /usr/local/lib/3dlib
+```
+
+### Reload / service files
+
+`3dlib serve` re-execs on **SIGHUP** or **SIGQUIT** (`Ctrl-\`) so code reloads with the **same PID** (safe for service managers).
+
+```bash
+kill -HUP "$(pidof -x 3dlib)"    # or: kill -HUP <pid>
+```
+
+**Gentoo OpenRC** (ednor and friends):
+
+```bash
+sudo cp /usr/local/3dlib/share/openrc/3dlib /etc/init.d/3dlib
+sudo chmod 755 /etc/init.d/3dlib
+sudo cp /usr/local/3dlib/share/openrc/3dlib.conf /etc/conf.d/3dlib
+# edit /etc/conf.d/3dlib if needed
+sudo rc-update add 3dlib default
+sudo rc-service 3dlib start
+sudo rc-service 3dlib reload    # after git pull / code edits
+```
+
+**systemd** (example; not used on ednor):
+
+```bash
+sudo cp /usr/local/3dlib/share/systemd/3dlib.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now 3dlib
+sudo systemctl reload 3dlib
 ```
 
 ## Usage
