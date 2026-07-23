@@ -253,7 +253,9 @@ sub _json_decode {
   return JSON::PP->new->utf8->decode($_[0]);
 }
 
-# Pick source text for a field: current if non-English, else orig if non-English.
+# Pick source text for a field.
+# Normal: only the *visible* value if it still looks non-English.
+# --force: prefer original (name_orig / description_orig) when it is non-English.
 sub _field_source {
   my ($current, $orig, $detect, $force) = @_;
   $current //= '';
@@ -264,80 +266,217 @@ sub _field_source {
     return length $orig ? $orig : (length $current ? $current : undef);
   }
   return $current if length $current && needs_translation($current, detect => $detect);
-  return $orig    if length $orig    && needs_translation($orig,    detect => $detect);
   return;
 }
 
-# Translate an item's description and/or name in place. Returns 1 if anything updated.
+# Build a filesystem-safe English basename (preserves extension when present).
+sub disk_basename {
+  my ($name, %o) = @_;
+  require Util;
+  require File::Basename;
+  $name = text_for_db($name // 'unnamed');
+  my ($stem, undef, $ext) = File::Basename::fileparse($name, qr/\.[^.]*/);
+  $stem = Util::sanitize_filename($stem);
+  $stem =~ s/\s+/ /g;
+  $stem =~ s/^\s+|\s+$//g;
+  $stem = 'unnamed' unless length $stem;
+  if (defined $o{ext} && length $o{ext}) {
+    my $e = $o{ext};
+    $e =~ s/^\.//;
+    $ext = ".$e";
+  }
+  $ext //= '';
+  return $stem . $ext;
+}
+
+# Rename item path on disk to match English catalog name. Only under library root.
+# Returns 1 if renamed (or would rename).
+sub rename_item_on_disk {
+  my ($item_id, %o) = @_;
+  my $dryrun = $o{dryrun} // 0;
+  my $row    = $o{row} // DB::get_item($item_id) or die "No item $item_id\n";
+  my \%it    = $row;
+
+  require Util;
+  require File::Basename;
+  require Cwd;
+  require LibConfig;
+
+  my $old = Util::text_for_db($it{path} // '');
+  die "rename: empty path for #$item_id\n" unless length $old;
+
+  my $root = Cwd::abs_path(LibConfig::library_root()) // LibConfig::library_root();
+  my $ap   = Cwd::abs_path($old) // $old;
+  $root =~ s{/\z}{};
+  $ap   =~ s{/\z}{};
+  die "rename: path outside library ($root): $ap\n"
+    unless $ap eq $root || index($ap, $root . '/') == 0;
+
+  my $en_name = $it{name} // File::Basename::basename($old);
+  # Prefer English catalog name; if still non-English, caller should translate first
+  my $new_base = disk_basename($en_name);
+  my $old_base = File::Basename::basename($old);
+  my $parent   = File::Basename::dirname($old);
+
+  # Keep project dirs without spurious extensions stripped oddly
+  if (-d $old && $new_base =~ /\./ && $it{kind} && $it{kind} eq 'project') {
+    # projects are directories: strip trailing .3mf etc if name was file-like
+    my ($stem) = File::Basename::fileparse($new_base, qr/\.[^.]*/);
+    $new_base = $stem if length $stem;
+    $new_base = Util::sanitize_filename($new_base);
+    $new_base =~ s/\s+/_/g;
+  }
+
+  my $new = "$parent/$new_base";
+  if ($old_base eq $new_base || $old eq $new) {
+    dry_print($dryrun, "rename #$item_id: path already English ($old_base)");
+    return 0;
+  }
+
+  # Avoid clobbering a different item
+  if (-e $new && (Cwd::abs_path($new) // $new) ne $ap) {
+    $new = Util::ensure_unique_path($new);
+  }
+
+  dry_print($dryrun, "rename #$item_id: $old -> $new");
+  return 1 if $dryrun;
+
+  if (-d $old) {
+    if (!rename($old, $new)) {
+      require File::Path;
+      require File::Copy;
+      # fallback: not same filesystem
+      die "rename dir $old -> $new: $!\n";
+    }
+  }
+  elsif (-f $old || -e $old) {
+    Util::safe_rename_or_move(src => $old, dest => $new, copy => 0, dryrun => 0);
+    $new = Util::text_for_db($new);
+  }
+  else {
+    warn "rename #$item_id: path missing on disk: $old (updating catalog only)\n";
+  }
+
+  $new = Util::text_for_db(Cwd::abs_path($new) // $new);
+  DB::repath_item($item_id, $old, $new);
+  DB::log_rename($old, $new, "translate rename-files #$item_id");
+  return 1;
+}
+
+# Translate an item's description and/or name in place; optionally rename on disk.
+# Returns 1 if anything updated.
 sub translate_item {
   my ($item_id, %o) = @_;
-  my $force  = $o{force} // 0;
-  my $dryrun = $o{dryrun} // 0;
-  my $row    = DB::get_item($item_id) or die "No item $item_id\n";
-  my \%it    = $row;
-  my $c      = $o{config} // config();
-  my $detect = $c->{detect};
+  my $force        = $o{force} // 0;
+  my $dryrun       = $o{dryrun} // 0;
+  my $rename_files = exists $o{rename_files} ? !!$o{rename_files} : 1;
+  my $row          = DB::get_item($item_id) or die "No item $item_id\n";
+  my \%it          = $row;
+  my $c            = $o{config} // config();
+  my $detect       = $c->{detect};
+
+  require File::Basename;
+  my $path_base = File::Basename::basename($it{path} // '');
+  my $path_needs = needs_translation($path_base, detect => $detect);
 
   my $desc_src = _field_source($it{description}, $it{description_orig}, $detect, $force);
   my $name_src = _field_source($it{name},        $it{name_orig},        $detect, $force);
 
-  unless ($desc_src || $name_src) {
-    dry_print($dryrun, "skip #$item_id (name + description already English)");
+  unless ($desc_src || $name_src || ($rename_files && $path_needs)) {
+    dry_print($dryrun, "skip #$item_id (name, description, path already English)");
     return 0;
   }
 
   my @bits;
   push @bits, 'name' if $name_src;
   push @bits, 'description' if $desc_src;
-  dry_print($dryrun, "translate #$item_id (", join('+', @bits), ") via API...");
-
-  if ($dryrun) {
-    return 1;
-  }
+  push @bits, 'path' if $rename_files && $path_needs;
+  dry_print($dryrun, "translate #$item_id (", join('+', @bits), ")...");
 
   my %upd;
   if ($desc_src) {
-    $upd{description} = translate_text($desc_src, config => $c, kind => 'description');
-    $upd{description_orig} =
-      (defined $it{description_orig} && length $it{description_orig})
-      ? $it{description_orig}
-      : $desc_src;
-  }
-  if ($name_src) {
-    my $en_name = translate_text($name_src, config => $c, kind => 'name');
-    # Preserve extension from the source name if the model dropped it
-    if ($name_src =~ /(\.[A-Za-z0-9]+)\z/ && $en_name !~ /\Q$1\E\z/i) {
-      $en_name .= $1;
-    }
-    $upd{name} = $en_name;
-    # Prefer recording the text we just translated. Keep an existing name_orig
-    # only when it is a different non-English string (e.g. earlier Chinese title).
-    my $prev = $it{name_orig} // '';
-    if (length $prev
-      && $prev ne $name_src
-      && $prev ne $en_name
-      && needs_translation($prev, detect => $detect))
-    {
-      $upd{name_orig} = $prev;
+    if ($dryrun) {
+      dry_print(1, "  would translate description");
     }
     else {
-      $upd{name_orig} = $name_src;
+      $upd{description} = translate_text($desc_src, config => $c, kind => 'description');
+      $upd{description_orig} =
+        (defined $it{description_orig} && length $it{description_orig})
+        ? $it{description_orig}
+        : $desc_src;
+    }
+  }
+  if ($name_src) {
+    if ($dryrun) {
+      dry_print(1, "  would translate name");
+    }
+    else {
+      my $en_name = translate_text($name_src, config => $c, kind => 'name');
+      if ($name_src =~ /(\.[A-Za-z0-9]+)\z/ && $en_name !~ /\Q$1\E\z/i) {
+        $en_name .= $1;
+      }
+      $upd{name} = $en_name;
+      my $prev = $it{name_orig} // '';
+      if (length $prev
+        && $prev ne $name_src
+        && $prev ne $en_name
+        && needs_translation($prev, detect => $detect))
+      {
+        $upd{name_orig} = $prev;
+      }
+      else {
+        $upd{name_orig} = $name_src;
+      }
     }
   }
 
-  DB::update_item_fields($item_id, \%upd);
-  return 1;
+  if (!$dryrun && keys %upd) {
+    DB::update_item_fields($item_id, \%upd);
+  }
+
+  my $did = ($desc_src || $name_src) ? 1 : 0;
+
+  if ($rename_files) {
+    my $row2;
+    if ($dryrun) {
+      $row2 = { $row->%* };
+      # Preview path using current English name, or note rename after name translate
+      if ($name_src && needs_translation($row2->{name} // '', detect => $detect)) {
+        dry_print(1, "  would rename path using translated English name");
+      }
+    }
+    else {
+      $row2 = DB::get_item($item_id) // $row;
+    }
+    my $rn = 0;
+    try {
+      $rn = rename_item_on_disk(
+        $item_id,
+        dryrun => $dryrun,
+        row    => $row2,
+      );
+    }
+    catch ($e) {
+      warn "rename #$item_id failed: $e";
+    }
+    $did ||= $rn;
+  }
+
+  return $did ? 1 : 0;
 }
 
 sub translate_many {
   my (%o) = @_;
-  my $force   = $o{force} // 0;
-  my $dryrun  = $o{dryrun} // 0;
-  my $verbose = $o{verbose} // 0;
-  my $limit   = $o{limit} // 5000;
-  my @ids     = @{ $o{ids} // [] };
-  my $c       = config();
-  my $detect  = $c->{detect};
+  my $force        = $o{force} // 0;
+  my $dryrun       = $o{dryrun} // 0;
+  my $verbose      = $o{verbose} // 0;
+  my $limit        = $o{limit} // 5000;
+  my $rename_files = exists $o{rename_files} ? !!$o{rename_files} : 1;
+  my @ids          = @{ $o{ids} // [] };
+  my $c            = config();
+  my $detect       = $c->{detect};
+
+  require File::Basename;
 
   my @rows;
   if (@ids) {
@@ -349,9 +488,11 @@ sub translate_many {
   else {
     for my $row (DB::list_items(limit => $limit)->@*) {
       my \%it = $row;
+      my $base = File::Basename::basename($it{path} // '');
       my $need =
            needs_translation($it{description} // '', detect => $detect)
         || needs_translation($it{name} // '',        detect => $detect)
+        || ($rename_files && needs_translation($base, detect => $detect))
         || (
         $force
         && (  needs_translation($it{description_orig} // '', detect => $detect)
@@ -365,7 +506,13 @@ sub translate_many {
   for my $row (@rows) {
     my \%it = $row;
     try {
-      my $ok = translate_item($it{id}, force => $force, dryrun => $dryrun, config => $c);
+      my $ok = translate_item(
+        $it{id},
+        force        => $force,
+        dryrun       => $dryrun,
+        config       => $c,
+        rename_files => $rename_files,
+      );
       $n++ if $ok;
       say "translate #$it{id}: ", ($ok ? 'ok' : 'skip') if $verbose;
     }

@@ -1024,7 +1024,7 @@ USAGE
 
 sub cmd_translate {
   my @args = @_;
-  my ($dryrun, $force, $verbose, $limit);
+  my ($dryrun, $force, $verbose, $limit, $rename_files);
   my $usage = <<'USAGE';
 Usage: 3dlib translate [ID|PATH]... [options]
 
@@ -1033,8 +1033,12 @@ Usage: 3dlib translate [ID|PATH]... [options]
 
   Detects CJK, German/French/etc. (diacritics or common words), and other
   scripts.  Pure-ASCII German (no umlauts) is included via word heuristics.
-  Originals are kept in name_orig / description_orig (files on disk are not
-  renamed).  description_orig is hidden in the web UI by default.
+  Originals are kept in name_orig / description_orig.
+  description_orig is hidden in the web UI by default.
+
+  By default also renames on-disk paths under the library to the English
+  basename (project dirs and single files).  Import does this automatically
+  when auto_import translation is enabled.
 
   Uses OPENAI_API_KEY by default (model gpt-4o-mini).  For Grok:
     export XAI_API_KEY=...
@@ -1045,28 +1049,31 @@ Usage: 3dlib translate [ID|PATH]... [options]
     auto  — non-English including CJK + European languages (default)
     cjk   — Chinese/Japanese/Korean only (old behavior)
 
-  With no IDs: translate all items whose description still looks non-English.
-  New imports auto-translate when translate.auto_import is on (default).
+  With no IDs: translate all items still needing name/description/path work.
 
 Examples:
   3dlib translate -v
   3dlib translate --dryrun
   3dlib translate 14 -v
   3dlib translate --force 8
+  3dlib translate --no-rename-files
 
 Options:
-  --dryrun              Show what would be translated
+  --dryrun              Show what would be translated/renamed
   --force               Re-translate even if already done
   --limit N             Max items when scanning (default 5000)
+  --rename-files        Rename on-disk paths to English (default)
+  --no-rename-files     Catalog text only; leave filesystem paths alone
   -h, --help            Show this help
   -v, --verbose         Print each item
 USAGE
   parse_opts(
     $usage, \@args,
-    'force'          => \$force,
-    'dryrun|dry-run' => \$dryrun,
-    'verbose|v'      => \$verbose,
-    'limit=i'        => \$limit,
+    'force'            => \$force,
+    'dryrun|dry-run'   => \$dryrun,
+    'verbose|v'        => \$verbose,
+    'limit=i'          => \$limit,
+    'rename-files!'    => \$rename_files,
   );
 
   ensure_db();
@@ -1074,13 +1081,14 @@ USAGE
   @ids = Thumbs::resolve_targets(@args) if @args;
 
   my $n = Translate::translate_many(
-    force   => $force ? 1 : 0,
-    dryrun  => $dryrun ? 1 : 0,
-    verbose => $verbose ? 1 : 0,
-    limit   => $limit,
-    ids     => @ids ? \@ids : undef,
+    force        => $force ? 1 : 0,
+    dryrun       => $dryrun ? 1 : 0,
+    verbose      => $verbose ? 1 : 0,
+    limit        => $limit,
+    ids          => @ids ? \@ids : undef,
+    rename_files => defined $rename_files ? ($rename_files ? 1 : 0) : 1,
   );
-  say(($dryrun ? "Would translate" : "Translated"), " $n item(s)");
+  say(($dryrun ? "Would translate/rename" : "Translated/renamed"), " $n item(s)");
 }
 
 sub cmd_help {

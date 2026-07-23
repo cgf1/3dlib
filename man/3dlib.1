@@ -243,8 +243,12 @@ Uses
 Originals are stored in
 .B name_orig
 and
-.BR description_orig
-(files on disk are not renamed).
+.BR description_orig .
+On-disk basenames under the library are renamed to English by default
+.RB ( \-\-rename\-files ;
+use
+.B \-\-no\-rename\-files
+to skip).  Import also stores English filenames when auto-translate is on.
 Detection defaults to all non-English
 .RB ( translate.detect=auto );
 set

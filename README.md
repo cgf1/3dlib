@@ -201,13 +201,20 @@ python3 -m venv /usr/local/3dlib/venv-mesh
 Non-English catalog **names and descriptions** (Chinese, German, French, Italian,
 Spanish, …) are translated via an OpenAI-compatible API. Detection covers CJK,
 letters with diacritics (äöüß, …), other scripts, and common non-English function
-words even in pure ASCII. Originals are stored in `name_orig` / `description_orig`
-(files on disk are not renamed). `description_orig` is hidden in the web UI.
+words even in pure ASCII. Originals are stored in `name_orig` / `description_orig`.
+`description_orig` is hidden in the web UI.
+
+**On-disk filenames** are also English:
+
+- **Import** translates the basename before writing under `/share/3d` (when
+  `translate.auto_import` is on and an API key is available).
+- **`3dlib translate`** renames existing library paths by default
+  (`--no-rename-files` to leave paths alone).
 
 ```bash
-3dlib translate -v              # all non-English names/descriptions
-3dlib translate 14 -v           # one item
-3dlib translate --dryrun        # preview first
+3dlib translate -v                 # names, descriptions, and paths
+3dlib translate --dryrun           # preview
+3dlib translate --no-rename-files  # catalog text only
 ```
 
 Config (`/share/3d/.library/config.json`):

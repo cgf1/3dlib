@@ -132,11 +132,15 @@ sub _import_project {
   my $root   = library_root();
 
   my $name_orig = text_for_db(basename($dir));
+  # HAN map first, then API English for on-disk project directory name
   my $name = sanitize_filename(translate_name($name_orig));
-  $name =~ s/\s+/_/g;
+  my ($name_en, $name_keep) = _maybe_translate_name($name, $name_orig);
+  $name_en = sanitize_filename($name_en);
+  $name_en =~ s/\s+/_/g;
+  $name_en = 'project' unless length $name_en;
 
   my $src = Meta::harvest_project_sources($dir);
-  my $dest = ensure_unique_path("$root/projects/$name");
+  my $dest = ensure_unique_path("$root/projects/$name_en");
 
   dry_print($dryrun, "project: $dir -> $dest");
 
@@ -146,7 +150,7 @@ sub _import_project {
       source => $dir,
       dest   => $dest,
       dryrun => 1,
-      name   => $name,
+      name   => $name_en,
       source_url => $src->{source_url},
     };
   }
@@ -165,10 +169,10 @@ sub _import_project {
     DB::log_rename($dir, $dest, 'project import');
   }
 
-  my $item_id = _catalog_project($dest, $name_orig, $src);
+  my $item_id = _catalog_project($dest, $name_keep // $name_orig, $src);
   DB::log_import(
     source => $dir, dest => $dest, action => ($copy ? 'copy-project' : 'move-project'),
-    item_id => $item_id, detail => $name
+    item_id => $item_id, detail => $name_en
   );
 
   if ($clean && $copy && -e $dir) {
@@ -253,8 +257,22 @@ sub _import_file {
     title      => $meta3->{title},
   );
 
+  # Translate basename to English before writing under /share/3d
+  my $name_orig = text_for_db(basename($file));
+  my ($name_en, $name_keep) = _maybe_translate_name($display, $name_orig);
+  my $disk_name = sanitize_filename($name_en);
+  # Ensure correct extension after sanitize/translate
+  {
+    my ($stem, undef, $fext) = fileparse($disk_name, qr/\.[^.]*/);
+    if (lc($fext // '') ne ".$ext") {
+      $stem = $disk_name if !length($stem);
+      $stem =~ s/\.$ext$//i;
+      $disk_name = sanitize_filename($stem) . ".$ext";
+    }
+  }
+
   my $subdir = $LibConfig::TYPE_DIRS{$ext} // $LibConfig::TYPE_DIRS{$type} // 'inbox';
-  my $dest   = ensure_unique_path("$root/$subdir/$display");
+  my $dest   = ensure_unique_path("$root/$subdir/$disk_name");
 
   dry_print($dryrun, ($copy ? 'copy' : 'move'), " file: $file -> $dest");
 
@@ -265,13 +283,12 @@ sub _import_file {
       dest   => $dest,
       type   => $type,
       dryrun => 1,
-      name   => $display,
+      name   => $name_en,
       design_model_id => $meta3->{design_model_id},
       source_url => $meta3->{source_url},
     };
   }
 
-  my $name_orig = text_for_db(basename($file));
   $dest = safe_rename_or_move(src => $file, dest => $dest, copy => $copy, dryrun => 0);
   $dest = text_for_db($dest);
   if ($name_orig ne text_for_db(basename($dest)) || dirname($file) ne dirname($dest)) {
@@ -288,8 +305,6 @@ sub _import_file {
     mtime      => $st->{mtime},
   );
   my ($desc_en, $desc_orig) = _maybe_translate_desc($desc);
-  my ($name_en, $name_keep) =
-    _maybe_translate_name(text_for_db(basename($dest)), $name_orig);
 
   my $item_id = DB::upsert_item({
     kind            => 'file',
@@ -348,9 +363,12 @@ sub _import_zip {
   my $base = text_for_db(basename($zipfile));
   $base =~ s/\.zip$//i;
   $base = sanitize_filename(translate_name($base));
-  $base =~ s/\s+/_/g;
+  my ($base_en) = _maybe_translate_name($base, $base);
+  $base_en = sanitize_filename($base_en);
+  $base_en =~ s/\s+/_/g;
+  $base_en = 'project' unless length $base_en;
 
-  my $dest_proj = ensure_unique_path("$root/projects/$base");
+  my $dest_proj = ensure_unique_path("$root/projects/$base_en");
   dry_print($dryrun, "unpack zip: $zipfile -> $dest_proj");
 
   if ($dryrun) {
@@ -666,7 +684,7 @@ sub _maybe_translate_desc {
   return ($en, $orig);
 }
 
-# Returns (name_en, name_orig). Catalog name only — does not rename on disk.
+# Returns (name_en, name_orig). Used for catalog name and on-disk basename.
 sub _maybe_translate_name {
   my ($name, $existing_orig) = @_;
   require Translate;

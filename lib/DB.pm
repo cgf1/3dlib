@@ -362,7 +362,7 @@ sub update_item_fields {
   my %allowed = map { $_ => 1 } qw(
     name name_orig description description_orig
     source_site source_url source_id sources_json
-    design_model_id status
+    design_model_id status path
   );
 
   require Util;
@@ -372,7 +372,7 @@ sub update_item_fields {
     next unless $allowed{$k};
     my $v = $fields->{$k};
     if (defined $v) {
-      $v = Util::text_for_db($v) if $k =~ /^(name|name_orig|description|description_orig|source_url|source_site|source_id|design_model_id)\z/;
+      $v = Util::text_for_db($v) if $k =~ /^(name|name_orig|description|description_orig|source_url|source_site|source_id|design_model_id|path)\z/;
       # Empty optional strings → NULL
       if ($k ne 'name' && $k ne 'status' && !length($v)) {
         $v = undef;
@@ -403,6 +403,50 @@ sub delete_item {
   $d->do('DELETE FROM files WHERE item_id = ?', undef, $id);
   my $n = $d->do('DELETE FROM items WHERE id = ?', undef, $id);
   return $n;
+}
+
+# After renaming a file or project directory on disk, update items.path and
+# all files.path rows that live under the old path.
+sub repath_item {
+  my ($item_id, $old_path, $new_path) = @_;
+  require Util;
+  $old_path = Util::text_for_db($old_path // '');
+  $new_path = Util::text_for_db($new_path // '');
+  die "repath_item: empty path\n" unless length $old_path && length $new_path;
+  return 0 if $old_path eq $new_path;
+
+  my $d  = dbh();
+  my $ts = now_ts();
+  $d->do(
+    'UPDATE items SET path = ?, updated_at = ? WHERE id = ?',
+    undef, $new_path, $ts, $item_id
+  );
+
+  my $files = item_files($item_id);
+  for my $f ($files->@*) {
+    my $p = $f->{path} // next;
+    $p = Util::text_for_db($p);
+    my $np;
+    if ($p eq $old_path) {
+      $np = $new_path;
+    }
+    elsif (index($p, $old_path . '/') == 0) {
+      $np = $new_path . substr($p, length($old_path));
+    }
+    else {
+      next;
+    }
+    my $rel = $f->{relpath};
+    if (defined $rel && $p eq $old_path) {
+      require File::Basename;
+      $rel = File::Basename::basename($new_path);
+    }
+    $d->do(
+      'UPDATE files SET path = ?, relpath = ? WHERE id = ?',
+      undef, $np, $rel, $f->{id}
+    );
+  }
+  return 1;
 }
 
 sub item_files {
