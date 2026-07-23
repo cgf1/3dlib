@@ -26,20 +26,44 @@ sub run {
   my $open_path;
   my $item_id;
 
-  # bambustudio:// scheme
-  if ($target =~ m{^bambustudio:}i) {
-    my $p = Meta::parse_bambustudio_scheme($target);
-    dry_print($dryrun, "bambustudio scheme: ", $target);
-    if ($p->{file} && -e $p->{file}) {
+  # Custom URL schemes (desktop handlers → 3dlib run %u)
+  #   bambustudio://library/42
+  #   freecad://library/42
+  #   3dlib://studio/42
+  #   bambustudio://open/?file=/path  (MakerWorld / Studio deep links)
+  if ($target =~ m{^(bambustudio|freecad|3dlib):}i) {
+    my $p =
+        $target =~ m{^bambustudio:}i ? Meta::parse_bambustudio_scheme($target)
+      : $target =~ m{^freecad:}i     ? Meta::parse_freecad_scheme($target)
+      :                                Meta::parse_3dlib_scheme($target);
+    dry_print($dryrun, ($p->{scheme} // 'scheme'), ": ", $target);
+    $app = $p->{app} if $p->{app};
+    if ($p->{item_id}) {
+      $target = $p->{item_id};
+      $no_import = 1;
+    }
+    elsif ($p->{file}) {
       $target = $p->{file};
     }
     elsif ($p->{http_url}) {
       $target = $p->{http_url};
+      $app    = 'studio';
     }
-    else {
+    elsif ($target =~ m{^bambustudio:}i) {
+      # Unknown bambustudio deep link — hand off to Studio itself
       dry_print($dryrun, "passing scheme URL through to Bambu Studio");
       return _launch_app('studio', $target, $dryrun);
     }
+    else {
+      die "Cannot resolve scheme URL: $target\n";
+    }
+  }
+
+  # Opening a FreeCAD file by path implies freecad unless caller forced studio
+  if (!defined $o{app} && $target !~ m{^(bambustudio|https?):}i
+    && path_ext($target) =~ /^(fcstd|f3d)\z/i)
+  {
+    $app = 'freecad';
   }
 
   # MakerWorld / HTTP URL

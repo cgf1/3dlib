@@ -318,8 +318,19 @@ sub parse_makerworld_url {
 sub parse_bambustudio_scheme {
   my ($url) = @_;
   return unless $url && $url =~ m{^bambustudio:}i;
-  my %out = (scheme => 'bambustudio', raw => $url);
-  # Common patterns:
+  my %out = (scheme => 'bambustudio', app => 'studio', raw => $url);
+  # Catalog item (preferred for web UI):
+  #   bambustudio://library/42
+  #   bambustudio://open?id=42
+  #   bambustudio://item/42
+  if ($url =~ m{bambustudio://(?:library|item)/(\d+)}i) {
+    $out{item_id} = $1;
+    return \%out;
+  }
+  if ($url =~ m{[?&]id=(\d+)}) {
+    $out{item_id} = $1;
+  }
+  # Common MakerWorld / Studio patterns:
   # bambustudio://open/?file=/path
   # bambustudio://open/https://...
   # bambustudio://open?file=...
@@ -337,6 +348,63 @@ sub parse_bambustudio_scheme {
     $out{http_url} //= $1;
   }
   return \%out;
+}
+
+# freecad://library/42
+# freecad://open?id=42
+# freecad://open/?file=/path/to/model.FCStd
+sub parse_freecad_scheme {
+  my ($url) = @_;
+  return unless $url && $url =~ m{^freecad:}i;
+  my %out = (scheme => 'freecad', app => 'freecad', raw => $url);
+  if ($url =~ m{freecad://(?:library|item|open)/(\d+)}i) {
+    $out{item_id} = $1;
+    return \%out;
+  }
+  if ($url =~ m{[?&]id=(\d+)}) {
+    $out{item_id} = $1;
+  }
+  if ($url =~ m{file=([^&]+)}) {
+    my $f = $1;
+    $f =~ s/\+/ /g;
+    $f =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/ge;
+    $out{file} = $f;
+  }
+  # freecad://open//share/3d/...  (rare)
+  if (!$out{file} && $url =~ m{freecad://open(/[^\s?#]+)}i) {
+    $out{file} = $1;
+  }
+  return \%out;
+}
+
+# Unified scheme (optional): 3dlib://studio/42  3dlib://freecad/42
+sub parse_3dlib_scheme {
+  my ($url) = @_;
+  return unless $url && $url =~ m{^3dlib:}i;
+  my %out = (scheme => '3dlib', raw => $url);
+  if ($url =~ m{3dlib://(studio|bambu|bambustudio|freecad|fcstd)/(\d+)}i) {
+    my ($app, $id) = (lc $1, $2);
+    $app = 'studio'  if $app =~ /^(bambu|bambustudio)\z/;
+    $app = 'freecad' if $app eq 'fcstd';
+    $out{app}     = $app;
+    $out{item_id} = $id;
+    return \%out;
+  }
+  if ($url =~ m{3dlib://open/(studio|freecad)/(\d+)}i) {
+    $out{app}     = lc $1;
+    $out{item_id} = $2;
+    return \%out;
+  }
+  return \%out;
+}
+
+# Build library deep links for the web UI / clipboard.
+sub library_open_url {
+  my (%o) = @_;
+  my $id  = $o{id} // die "library_open_url: id required\n";
+  my $app = lc($o{app} // 'studio');
+  return "freecad://library/$id" if $app eq 'freecad' || $app eq 'fcstd' || $app eq 'fc';
+  return "bambustudio://library/$id";
 }
 
 1;

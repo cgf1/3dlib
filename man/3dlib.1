@@ -209,10 +209,22 @@ and an
 page per item for name, description, source URLs, and related metadata.
 .TP
 .B install-handler
-Install a desktop entry and set
+Install desktop entries and set
 .B 3dlib
 as the default handler for
-.BR x-scheme-handler/bambustudio .
+.BR x-scheme-handler/bambustudio ,
+.BR x-scheme-handler/freecad ,
+and
+.BR x-scheme-handler/3dlib .
+Web UI open buttons use
+.B bambustudio://library/ID
+and
+.BR freecad://library/ID
+so the desktop session (with the correct
+.BR DISPLAY /xpra)
+starts
+.B 3dlib run ,
+which then launches the app.
 .TP
 .B repair-encoding
 Fix UTF-8 mojibake in catalog text fields

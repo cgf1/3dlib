@@ -77,7 +77,7 @@ my @COMMAND_HELP = (
   [ 'tag',              'Add/remove/list keywords (tags) on items' ],
   [ 'import',           'Import file/dir/zip into /share/3d' ],
   [ 'init',             'Create library dirs + empty database' ],
-  [ 'install-handler',  'Register bambustudio:// handler' ],
+  [ 'install-handler',  'Register bambustudio:// and freecad:// handlers' ],
   [ 'ls',               'List items' ],
   [ 'query',            'Full-text search' ],
   [ 'repair-encoding',  'Fix UTF-8 mojibake in catalog fields' ],
@@ -91,8 +91,8 @@ my @COMMAND_HELP = (
 );
 
 if (!$cmds{$cmd}) {
-  # Allow: 3dlib bambustudio://... or 3dlib https://... or 3dlib /path
-  if ($cmd =~ m{^(bambustudio:|https?://|/|\.)}i || -e $cmd) {
+  # Allow: 3dlib bambustudio://... freecad://... https://... or /path
+  if ($cmd =~ m{^(bambustudio:|freecad:|3dlib:|https?://|/|\.)}i || -e $cmd) {
     unshift @ARGV, $cmd;
     $cmd = 'run';
   }
@@ -824,19 +824,26 @@ Usage: 3dlib run TARGET [options]
        3dlib open TARGET [options]
 
   Resolve TARGET, optionally import into /share/3d, then open in an app.
-  Default app is Bambu Studio.  Also used as the bambustudio:// handler.
+  Default app is Bambu Studio.  Desktop URL handlers call this command:
+
+    3dlib run 'bambustudio://library/ID'
+    3dlib run 'freecad://library/ID'
 
 TARGET:
-  local path, catalog ID, MakerWorld https URL, or bambustudio:// deep link
+  local path, catalog ID, MakerWorld https URL,
+  bambustudio://…, freecad://…, or 3dlib://studio|freecad/ID
 
 Options:
-  --app studio|freecad  Application to launch (default: studio)
+  --app studio|freecad  Application to launch (default: studio; freecad for .FCStd)
   --dryrun, --dry-run   Describe only; do not import or launch
   --no-import           Open without importing into the library
   -h, --help            Show this help
 
+Register handlers (once per desktop session user):
+  3dlib install-handler
+
 FreeCAD config (config.json or env):
-  freecad / THREEDLIB_FREECAD       e.g. "ssh -Y tomoon freecad"
+  freecad / THREEDLIB_FREECAD       e.g. "ssh -Y tomoon freecad" or "freecad"
   freecad_shell / THREEDLIB_FREECAD_SHELL=1   use /bin/sh -c for complex commands
   Use {file} in the command for the path, or it is appended as the last arg.
 USAGE
@@ -894,10 +901,16 @@ sub cmd_install_handler {
   my $usage = <<'USAGE';
 Usage: 3dlib install-handler
 
-  Install a desktop entry and set 3dlib as the default handler for
-  x-scheme-handler/bambustudio (MakerWorld "Open in Bambu Studio").
+  Install desktop entries and set 3dlib as the default handler for:
+    x-scheme-handler/bambustudio   (MakerWorld + web "Open in Bambu Studio")
+    x-scheme-handler/freecad       (web "Open in FreeCAD")
+    x-scheme-handler/3dlib         (optional unified 3dlib://studio/ID)
 
-  Restore the previous handler with:
+  Handlers run in your desktop session (correct DISPLAY / xpra), then:
+    3dlib run 'bambustudio://library/ID'
+    3dlib run 'freecad://library/ID'
+
+  Restore Bambu Studio handler example:
     xdg-mime default OrcaSlicer.desktop x-scheme-handler/bambustudio
 
 Options:
@@ -906,48 +919,86 @@ USAGE
   parse_opts($usage, \@args);
   die "Error: unexpected argument(s): @args\n" if @args;
 
-  my $desktop = <<'EOF';
+  my $bambu = <<'EOF';
 [Desktop Entry]
-Name=3dlib (Bambu Studio via library)
-Comment=Import into /share/3d then open in Bambu Studio
-Exec=/usr/local/bin/3dlib run %U
+Name=3dlib (Bambu Studio)
+Comment=Open library items / MakerWorld links via 3dlib then Bambu Studio
+Exec=/usr/local/bin/3dlib run %u
 Terminal=false
 Type=Application
-MimeType=model/stl;model/3mf;application/vnd.ms-3mfdocument;application/prs.wavefront-obj;application/x-amf;x-scheme-handler/bambustudio;
+MimeType=model/stl;model/3mf;application/vnd.ms-3mfdocument;application/prs.wavefront-obj;application/x-amf;x-scheme-handler/bambustudio;x-scheme-handler/3dlib;
 Categories=Graphics;3DGraphics;Engineering;
-Keywords=3D;Printing;Slicer;Bambu;MakerWorld
+Keywords=3D;Printing;Slicer;Bambu;MakerWorld;3dlib
 StartupNotify=false
 NoDisplay=false
 EOF
 
-  my $dir = $ENV{HOME} . '/.local/share/applications';
-  make_path($dir);
-  my $path = "$dir/3dlib-bambu.desktop";
-  open my $fh, '>', $path or die "Cannot write $path: $!\n";
-  print {$fh} $desktop;
-  close $fh;
-  say "Wrote $path";
+  my $freecad = <<'EOF';
+[Desktop Entry]
+Name=3dlib (FreeCAD)
+Comment=Open FreeCAD library items via 3dlib
+Exec=/usr/local/bin/3dlib run %u
+Terminal=false
+Type=Application
+MimeType=application/x-extension-fcstd;application/x-freecad;x-scheme-handler/freecad;
+Categories=Graphics;3DGraphics;Engineering;Science;
+Keywords=3D;CAD;FreeCAD;FCStd;3dlib
+StartupNotify=false
+NoDisplay=false
+EOF
 
-  my $ref = '/usr/local/lib/3dlib/3dlib-bambu.desktop';
-  open my $fh2, '>', $ref or warn "Could not write $ref: $!\n";
-  if ($fh2) {
-    print {$fh2} $desktop;
-    close $fh2;
-    say "Wrote $ref";
+  my $dir = ($ENV{HOME} // die "HOME not set\n") . '/.local/share/applications';
+  make_path($dir);
+
+  my @written;
+  for my $pair (
+    [ '3dlib-bambu.desktop',   $bambu ],
+    [ '3dlib-freecad.desktop', $freecad ],
+  ) {
+    my ($name, $body) = @$pair;
+    my $path = "$dir/$name";
+    open my $fh, '>', $path or die "Cannot write $path: $!\n";
+    print {$fh} $body;
+    close $fh;
+    say "Wrote $path";
+    push @written, $name;
+
+    # Keep repo/system template in sync when the symlink tree exists
+    my $ref = "/usr/local/3dlib/share/applications/$name";
+    if (open my $fh2, '>', $ref) {
+      print {$fh2} $body;
+      close $fh2;
+      say "Wrote $ref";
+    }
   }
 
   system('update-desktop-database', $dir);
-  my $rc = system('xdg-mime', 'default', '3dlib-bambu.desktop', 'x-scheme-handler/bambustudio');
-  if ($rc == 0) {
-    say "Set default handler for bambustudio:// -> 3dlib";
+
+  my @schemes = (
+    [ '3dlib-bambu.desktop',   'x-scheme-handler/bambustudio' ],
+    [ '3dlib-bambu.desktop',   'x-scheme-handler/3dlib' ],
+    [ '3dlib-freecad.desktop', 'x-scheme-handler/freecad' ],
+  );
+  for my $s (@schemes) {
+    my ($desk, $mime) = @$s;
+    my $rc = system('xdg-mime', 'default', $desk, $mime);
+    if ($rc == 0) {
+      say "Set default handler: $mime -> $desk";
+    }
+    else {
+      say "To activate $mime:";
+      say "  xdg-mime default $desk $mime";
+    }
   }
-  else {
-    say "Wrote desktop file. To activate:";
-    say "  xdg-mime default 3dlib-bambu.desktop x-scheme-handler/bambustudio";
-  }
-  say "Verify: xdg-mime query default x-scheme-handler/bambustudio";
-  say "Previous handler was often OrcaSlicer.desktop - restore with:";
-  say "  xdg-mime default OrcaSlicer.desktop x-scheme-handler/bambustudio";
+
+  say "";
+  say "Verify:";
+  say "  xdg-mime query default x-scheme-handler/bambustudio";
+  say "  xdg-mime query default x-scheme-handler/freecad";
+  say "Test:";
+  say "  3dlib run 'bambustudio://library/1'";
+  say "  3dlib run 'freecad://library/1'";
+  say "  xdg-open 'bambustudio://library/1'";
 }
 
 

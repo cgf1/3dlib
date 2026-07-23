@@ -81,40 +81,56 @@ export THREEDLIB_IMAGE_VIEWER='feh -.'   # or imv, sxiv, …
 # config.json: "image_viewer": "feh"
 ```
 
-### Launch apps (web + CLI)
+### Launch apps (URL handlers + CLI)
 
-Web item page: **Open in Bambu Studio** (3mf) and **Open in FreeCAD** (fcstd) stay on
-the page and show “Launched …”. CLI:
+The web UI does **not** start GUI apps from the daemon. Buttons use custom
+URL schemes; the desktop session runs `3dlib` (with the right `DISPLAY` /
+xpra), and `3dlib` launches the app:
+
+| Button | URL | Handler |
+|--------|-----|---------|
+| Open in Bambu Studio | `bambustudio://library/ID` | `x-scheme-handler/bambustudio` |
+| Open in FreeCAD | `freecad://library/ID` | `x-scheme-handler/freecad` |
+
+Register once per user desktop:
 
 ```bash
-3dlib run 9                    # Bambu Studio (default)
-3dlib run 9 --app freecad      # FreeCAD
+3dlib install-handler
+# verify:
+xdg-mime query default x-scheme-handler/bambustudio
+xdg-mime query default x-scheme-handler/freecad
 ```
 
-FreeCAD on another host (e.g. `tomoon`), when `/share/3d` is the same path there
-(NFS/bind mount):
+CLI (same path the handlers use):
+
+```bash
+3dlib run 'bambustudio://library/9'
+3dlib run 'freecad://library/9'
+3dlib run 9                    # Studio by default
+3dlib run 9 --app freecad
+xdg-open 'bambustudio://library/9'
+```
+
+App binaries (used by `3dlib run` in your session):
 
 ```json
 {
   "bambu_studio": "/usr/local/bin/bambu-studio",
-  "freecad": "ssh -Y tomoon freecad",
+  "freecad": "freecad",
   "freecad_shell": false
 }
 ```
 
 | Key / env | Purpose |
 |-----------|---------|
-| `freecad` / `THREEDLIB_FREECAD` | Command; `{file}` = path, or path is appended |
-| `freecad_shell` / `THREEDLIB_FREECAD_SHELL=1` | Run via `/bin/sh -c` for complex quoting |
 | `bambu_studio` | Bambu Studio binary |
+| `freecad` / `THREEDLIB_FREECAD` | FreeCAD command; `{file}` optional |
+| `freecad_shell` / `THREEDLIB_FREECAD_SHELL=1` | Run FreeCAD via `/bin/sh -c` |
 
-Examples:
+Remote FreeCAD example (shared library path on `tomoon`):
 
 ```text
-freecad
-ssh -Y tomoon freecad
-ssh -Y tomoon freecad {file}
-ssh -Y tomoon 'freecad {file}'     # with freecad_shell: true
+"freecad": "ssh -Y tomoon freecad"
 ```
 
 ### Web UI (LAN family use)

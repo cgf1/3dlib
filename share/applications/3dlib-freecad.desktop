@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=3dlib (FreeCAD)
+Comment=Open FreeCAD library items via 3dlib
+Exec=/usr/local/bin/3dlib run %u
+Terminal=false
+Type=Application
+MimeType=application/x-extension-fcstd;application/x-freecad;x-scheme-handler/freecad;
+Categories=Graphics;3DGraphics;Engineering;Science;
+Keywords=3D;CAD;FreeCAD;FCStd;3dlib
+StartupNotify=false
+NoDisplay=false

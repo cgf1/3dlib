@@ -248,23 +248,38 @@ sub _handle {
     return _send($c, 200, 'application/json',
       JSON::PP->new->utf8->encode(DB::stats()));
   }
+  # Open: default is desktop URL scheme (browser → xdg handler → 3dlib run).
+  # mode=direct forces server-side launch (usually wrong for DISPLAY; kept for debugging).
   if ($path eq '/open' || $path eq '/api/open') {
     my %f = $r->method eq 'POST' ? _parse_form($r) : ();
-    my $id  = $f{id}  // $qp{id}  or die "missing id\n";
-    my $app = $f{app} // $qp{app} // 'studio';
-    my $res = Run::run(target => $id, no_import => 1, app => $app);
-    # Prefer JSON for XHR / POST so the item page can stay put
-    if ($r->method eq 'POST' || ($qp{format} // '') eq 'json') {
-      return _send($c, 200, 'application/json',
-        JSON::PP->new->utf8->encode($res));
+    my $id   = $f{id}  // $qp{id}  or die "missing id\n";
+    my $app  = $f{app} // $qp{app} // 'studio';
+    my $mode = lc($f{mode} // $qp{mode} // 'url');
+    if ($mode ne 'direct') {
+      my $url = Meta::library_open_url(id => $id, app => $app);
+      if (($qp{format} // $f{format} // '') eq 'json'
+        || $r->method eq 'POST')
+      {
+        return _send($c, 200, 'application/json',
+          JSON::PP->new->utf8->encode({
+            ok      => 1,
+            mode    => 'url',
+            app     => $app,
+            url     => $url,
+            message => $app eq 'freecad'
+              ? 'Opening FreeCAD via system handler'
+              : 'Opening Bambu Studio via system handler',
+          }));
+      }
+      return _send(
+        $c, 302, 'text/html; charset=utf-8',
+        qq{<a href="} . _esc($url) . qq{">Open</a>},
+        extra_headers => { Location => $url },
+      );
     }
-    # Legacy GET navigation: bounce back to the item with a flash banner
-    my $msg = uri_escape($res->{message} // 'Launched');
-    return _send(
-      $c, 302, 'text/html; charset=utf-8',
-      qq{<a href="/item/$id">Back</a>},
-      extra_headers => { Location => "/item/$id?flash=$msg" },
-    );
+    my $res = Run::run(target => $id, no_import => 1, app => $app);
+    return _send($c, 200, 'application/json',
+      JSON::PP->new->utf8->encode($res));
   }
   if ($path eq '/stl-viewer') {
     return _send($c, 200, 'text/html; charset=utf-8',
@@ -1366,10 +1381,12 @@ sub _page_home {
     # Projects / mixed: peek is expensive; type badges are enough for gallery
     my $launch = '';
     if ($has_3mf) {
-      $launch .= qq{<button type="button" class="btn secondary btn-launch" data-app="studio" data-id="$it{id}" title="Open in Bambu Studio">Studio</button>};
+      my $u = _esc(Meta::library_open_url(id => $it{id}, app => 'studio'));
+      $launch .= qq{<a class="btn secondary btn-launch" href="$u" data-app="studio" data-id="$it{id}" title="Open in Bambu Studio (desktop handler)">Studio</a>};
     }
     if ($has_fc) {
-      $launch .= qq{<button type="button" class="btn secondary btn-launch" data-app="freecad" data-id="$it{id}" title="Open in FreeCAD">FreeCAD</button>};
+      my $u = _esc(Meta::library_open_url(id => $it{id}, app => 'freecad'));
+      $launch .= qq{<a class="btn secondary btn-launch" href="$u" data-app="freecad" data-id="$it{id}" title="Open in FreeCAD (desktop handler)">FreeCAD</a>};
     }
     my $actions_html = length $launch
       ? qq{<div class="card-actions">$launch</div>}
@@ -1448,7 +1465,8 @@ sub _page_home {
   return _html_wrap('Library', $filters, $extra, $qp{q}, $role, $role_via);
 }
 
-# Shared launch-button JS for gallery + item page (POST /open, stay on page).
+# Launch via custom URL schemes (desktop handlers run 3dlib with the user's
+# session DISPLAY / xpra). Stay on the page and show a status banner.
 sub _launch_js {
   return <<'JS';
 <script>
@@ -1467,37 +1485,15 @@ document.addEventListener('DOMContentLoaded', () => {
     flash.textContent = msg;
     flash.className = 'banner ' + (isErr ? 'err' : 'ok');
   }
-  document.querySelectorAll('.btn-launch').forEach(btn => {
-    btn.addEventListener('click', async (e) => {
-      e.preventDefault();
+  document.querySelectorAll('a.btn-launch').forEach(a => {
+    a.addEventListener('click', (e) => {
+      // Let the browser hand the URL to the desktop (bambustudio:// / freecad://).
+      // Prevent navigating the page away if the handler consumes it.
       e.stopPropagation();
-      const app = btn.dataset.app || 'studio';
-      const id = btn.dataset.id;
+      const app = a.dataset.app || 'studio';
       const label = app === 'freecad' ? 'FreeCAD' : 'Bambu Studio';
-      btn.disabled = true;
-      const prev = btn.textContent;
-      btn.textContent = '...';
-      try {
-        const res = await fetch('/open', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'id=' + encodeURIComponent(id) + '&app=' + encodeURIComponent(app),
-          credentials: 'same-origin',
-        });
-        const text = await res.text();
-        let data = {};
-        try { data = JSON.parse(text); } catch (_) {}
-        if (!res.ok) {
-          showFlash('Failed to launch ' + label + ': ' + (data.error || text || res.status), true);
-          return;
-        }
-        showFlash(data.message || ('Launched ' + label));
-      } catch (err) {
-        showFlash('Failed to launch ' + label + ': ' + err, true);
-      } finally {
-        btn.disabled = false;
-        btn.textContent = prev;
-      }
+      showFlash('Opening ' + label + ' via system handler…');
+      // Do not preventDefault — href must fire for the scheme handler.
     });
   });
 });
@@ -1543,10 +1539,12 @@ sub _page_item ($id, $role = undef, $role_via = undef, $saved = undef, $flash = 
     $actions .= qq{<a class="btn secondary" href="/item/$id/edit">Edit</a>};
   }
   if ($has_3mf) {
-    $actions .= qq{<button type="button" class="btn secondary btn-launch" data-app="studio" data-id="$id">Open in Bambu Studio</button>};
+    my $u = _esc(Meta::library_open_url(id => $id, app => 'studio'));
+    $actions .= qq{<a class="btn secondary btn-launch" href="$u" data-app="studio" data-id="$id">Open in Bambu Studio</a>};
   }
   if ($has_fcstd) {
-    $actions .= qq{<button type="button" class="btn secondary btn-launch" data-app="freecad" data-id="$id">Open in FreeCAD</button>};
+    my $u = _esc(Meta::library_open_url(id => $id, app => 'freecad'));
+    $actions .= qq{<a class="btn secondary btn-launch" href="$u" data-app="freecad" data-id="$id">Open in FreeCAD</a>};
   }
   my ($stl) = grep { my \%f = $_; ($f{ext} // '') eq 'stl' } $files->@*;
   if ($stl || ($it{type} // '') eq 'stl') {
