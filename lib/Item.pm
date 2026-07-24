@@ -62,6 +62,37 @@ class Item {
     return $path;
   }
 
+  # Paths to pass to Bambu Studio. Prefer every existing .stl (Studio accepts
+  # multiple positional files). If none, fall back to a single openable path
+  # (3mf / model / etc.).
+  method studio_open_paths () {
+    my @stls;
+    for my $f ($self->files->@*) {
+      my \%file = $f;
+      my $p = $file{path} // next;
+      next unless -f $p;
+      my $ext = lc($file{ext} // '');
+      $ext =~ s/^\.//;
+      if (!$ext) {
+        require Util;
+        $ext = Util::path_ext($p);
+      }
+      push @stls, $p if $ext eq 'stl';
+    }
+    # Single-file STL catalog entry
+    if (!@stls && $kind eq 'file' && -f $path) {
+      require Util;
+      push @stls, $path if Util::path_ext($path) eq 'stl';
+    }
+    if (@stls) {
+      # Stable order (catalog relpath order already from item_files)
+      return \@stls;
+    }
+    my $one = $self->openable_path('3mf');
+    $one = $self->openable_path unless $one && -e $one;
+    return ($one && -e $one) ? [$one] : [];
+  }
+
   method has_thumb () {
     return defined $thumb_path && length $thumb_path && -f $thumb_path;
   }

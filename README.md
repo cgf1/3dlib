@@ -136,6 +136,8 @@ CLI (same path the handlers use):
 3dlib run 9                    # Studio by default
 3dlib run 9 --app freecad
 xdg-open 'bambustudio://library/9'
+# Projects with STLs: opens every .stl (Studio accepts multiple args).
+# If there are no STLs, falls back to a single 3MF/model path.
 ```
 
 App binaries (used by `3dlib run` in your session):

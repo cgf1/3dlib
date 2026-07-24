@@ -159,11 +159,34 @@ sub run {
     die "Cannot resolve target: $target\n";
   }
 
-  die "Nothing to open\n" unless $open_path && length $open_path;
-  die "Missing file: $open_path\n" unless $open_path =~ m{^https?://}i || -e $open_path;
+  # Catalog item + Studio: open every .stl (Studio accepts multiple args).
+  my $open_arg = $open_path;
+  if ($item_id && $app eq 'studio') {
+    my $it = DB::get_item($item_id);
+    if ($it) {
+      my $paths = _studio_open_paths($it);
+      if ($paths && $paths->@*) {
+        $open_arg = @$paths == 1 ? $paths->[0] : $paths;
+      }
+    }
+  }
+  elsif ($app eq 'studio' && defined $open_path && -d $open_path) {
+    my $paths = _stls_under_dir($open_path);
+    $open_arg = $paths if $paths && @$paths;
+  }
 
-  dry_print($dryrun, "open ($app): $open_path", $item_id ? " (item #$item_id)" : '');
-  return _launch_app($app, $open_path, $dryrun, $item_id);
+  my @check = ref $open_arg eq 'ARRAY' ? $open_arg->@* : ($open_arg);
+  die "Nothing to open\n" unless @check && defined $check[0] && length $check[0];
+  for my $p (@check) {
+    next if $p =~ m{^https?://}i;
+    die "Missing file: $p\n" unless -e $p;
+  }
+
+  my $disp = ref $open_arg eq 'ARRAY'
+    ? join(' ', map { basename($_) } $open_arg->@*) . " (" . scalar($open_arg->@*) . " files)"
+    : $open_arg;
+  dry_print($dryrun, "open ($app): $disp", $item_id ? " (item #$item_id)" : '');
+  return _launch_app($app, $open_arg, $dryrun, $item_id);
 }
 
 sub _openable_path ($item, $app = 'studio') {
@@ -179,13 +202,44 @@ sub _openable_path ($item, $app = 'studio') {
   return Item::from_row(\%it)->openable_path($prefer);
 }
 
+sub _studio_open_paths ($item) {
+  if (ref $item && ref $item ne 'HASH' && $item->can('studio_open_paths')) {
+    return $item->studio_open_paths;
+  }
+  my \%it = $item;
+  return Item::from_row(\%it)->studio_open_paths;
+}
+
+# Loose directory (not yet preferred over catalog): every .stl under it.
+sub _stls_under_dir ($dir) {
+  return unless $dir && -d $dir;
+  require File::Find;
+  my @stls;
+  File::Find::find({
+    wanted => sub {
+      return unless -f $_;
+      return unless path_ext($File::Find::name) eq 'stl';
+      push @stls, $File::Find::name;
+    },
+    no_chdir => 1,
+  }, $dir);
+  return unless @stls;
+  return [ sort @stls ];
+}
+
 # Expand a command template into argv (or shell string).
-# {file} is replaced with the path; if omitted, path is appended.
+# {file} is replaced with the first path; extra paths are appended.
+# $files may be a path string or an arrayref of paths.
 sub expand_cmd {
-  my ($spec, $file, %o) = @_;
+  my ($spec, $files, %o) = @_;
   $spec //= '';
   $spec =~ s/^\s+|\s+\z//g;
   die "empty launch command\n" unless length $spec;
+
+  my @files = ref $files eq 'ARRAY' ? $files->@* : ($files);
+  @files = grep { defined && length } @files;
+  die "nothing to open\n" unless @files;
+  my $file = $files[0];
 
   if ($o{shell}) {
     my $s = $spec;
@@ -193,11 +247,18 @@ sub expand_cmd {
       my $q = $file;
       $q =~ s/'/'\\''/g;
       $s =~ s/\{file\}/'$q'/g;
+      for my $extra (@files[1 .. $#files]) {
+        my $e = $extra;
+        $e =~ s/'/'\\''/g;
+        $s .= " '$e'";
+      }
     }
     else {
-      my $q = $file;
-      $q =~ s/'/'\\''/g;
-      $s .= " '$q'";
+      for my $f (@files) {
+        my $q = $f;
+        $q =~ s/'/'\\''/g;
+        $s .= " '$q'";
+      }
     }
     return (shell => 1, cmd => $s);
   }
@@ -207,7 +268,12 @@ sub expand_cmd {
   my $had_ph = ($tmp =~ s/\{file\}/$ph/g) ? 1 : 0;
   my @cmd = shellwords($tmp);
   @cmd = map { $_ eq $ph ? $file : $_ } @cmd;
-  push @cmd, $file unless $had_ph;
+  if ($had_ph) {
+    push @cmd, @files[1 .. $#files] if @files > 1;
+  }
+  else {
+    push @cmd, @files;
+  }
   die "empty launch command after parse\n" unless @cmd;
   return (shell => 0, cmd => \@cmd);
 }
@@ -222,6 +288,8 @@ sub _launch_app {
     $spec              = LibConfig::freecad_cmd();
     $shell             = LibConfig::freecad_shell();
     $require_local_bin = 0;    # may be "ssh tomoon freecad"
+    # FreeCAD: single path only
+    $arg = $arg->[0] if ref $arg eq 'ARRAY';
   }
   else {
     $label             = 'Bambu Studio';
@@ -231,6 +299,8 @@ sub _launch_app {
   }
 
   my %ex = expand_cmd($spec, $arg, shell => $shell);
+
+  my $open_disp = ref $arg eq 'ARRAY' ? [ $arg->@* ] : $arg;
 
   if ($dryrun) {
     if ($ex{shell}) {
@@ -243,7 +313,7 @@ sub _launch_app {
       dryrun  => 1,
       app     => $app,
       label   => $label,
-      open    => $arg,
+      open    => $open_disp,
       item_id => $item_id,
       cmd     => $ex{shell} ? $ex{cmd} : join(' ', $ex{cmd}->@*),
     };
@@ -281,7 +351,7 @@ sub _launch_app {
     app     => $app,
     label   => $label,
     pid     => $pid,
-    open    => $arg,
+    open    => $open_disp,
     item_id => $item_id,
     cmd     => $cmd_disp,
     message => "Launched $label",
