@@ -1,5 +1,6 @@
 package Web;
 use v5.40;
+use utf8;    # source has em dash / ellipsis literals; encode_utf8 in _send
 use experimental qw(class refaliasing declared_refs);
 use Encode ();
 use HTTP::Daemon;
