@@ -41,7 +41,8 @@ error_log="${THREEDLIB_LOG}"
 extra_started_commands="reload"
 
 depend() {
-	need net localmount
+	# /share/3d and download_dir are on NFS — wait for netmount (see conf.d rc_need).
+	need net localmount netmount
 	after bootmisc
 	use dns logger
 }
@@ -58,6 +59,22 @@ checkconfig() {
 	if ! getent group "${THREEDLIB_GROUP}" >/dev/null 2>&1; then
 		eerror "Group ${THREEDLIB_GROUP} does not exist (edit /etc/conf.d/3dlib)"
 		return 1
+	fi
+	# Fail early if NFS /share is not actually mounted (stale empty mountpoint).
+	libroot="${THREEDLIB_ROOT:-/share/3d}"
+	shareroot=$(dirname "${libroot}")
+	if [ ! -d "${libroot}" ]; then
+		eerror "Library root missing: ${libroot} (is NFS mounted?)"
+		return 1
+	fi
+	if command -v findmnt >/dev/null 2>&1; then
+		if ! findmnt -n -t nfs,nfs4 --target /share >/dev/null 2>&1 \
+			&& ! findmnt -n -t nfs,nfs4 --target "${shareroot}" >/dev/null 2>&1 \
+			&& ! findmnt -n -t nfs,nfs4 --target "${libroot}" >/dev/null 2>&1
+		then
+			eerror "/share does not look like an NFS mount — start netmount first"
+			return 1
+		fi
 	fi
 	return 0
 }
