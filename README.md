@@ -135,8 +135,8 @@ CLI (same path the handlers use):
 3dlib run 'freecad://library/9'
 3dlib run 9                    # Studio by default
 3dlib run 9 --app freecad
-3dlib run latest               # newest catalog item (by mtime)
-3dlib run latest-1             # second newest (also latest~1)
+3dlib run latest               # highest catalog id
+3dlib run latest-1             # second-highest id (also latest~1)
 3dlib describe latest-2
 xdg-open 'bambustudio://library/9'
 # Projects with STLs: opens every .stl (Studio accepts multiple args).

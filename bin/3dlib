@@ -845,10 +845,10 @@ Usage: 3dlib run TARGET [options]
 TARGET:
   local path, catalog ID, MakerWorld https URL,
   bambustudio://…, freecad://…, or 3dlib://studio|freecad/ID
-  Recency (by mtime, newest first):
-    latest          newest item
-    latest-1        second newest
-    latest-2        third newest  (also latest~1, new, new-1)
+  Recency (by catalog id, highest first — stable vs unzip mtimes):
+    latest          highest id
+    latest-1        second-highest id
+    latest-2        third-highest id  (also latest~1, new, new-1)
 
 Options:
   --app studio|freecad  Application to launch (default: studio; freecad for .FCStd)

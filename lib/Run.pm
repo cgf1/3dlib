@@ -27,7 +27,7 @@ sub run {
   my $item_id;
 
   # Recency aliases: latest, latest-1, latest-2, latest~1, new, …
-  # (newest by mtime; resolved before path checks so "latest" is never a cwd file)
+  # (highest catalog id; resolved before path checks so "latest" is never a cwd file)
   if (DB::is_recency_alias($target)) {
     my $row = DB::resolve_item_ref($target);    # dies if out of range
     dry_print($dryrun, "recency $target -> #$row->{id} ", ($row->{name} // ''));

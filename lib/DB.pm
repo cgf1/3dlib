@@ -351,7 +351,8 @@ sub get_item {
   return $row;
 }
 
-# Newest-by-mtime catalog entry. $offset 0 = latest, 1 = second newest, …
+# Highest catalog id (import/catalog order). $offset 0 = max id, 1 = second highest, …
+# Prefer id over mtime: unpack/import often rewrites file mtimes.
 sub nth_newest {
   my ($offset) = @_;
   $offset = 0 unless defined $offset;
@@ -359,7 +360,7 @@ sub nth_newest {
     unless $offset =~ /^\d+$/;
   $offset = 0 + $offset;
   my $row = dbh()->selectrow_hashref(
-    'SELECT * FROM items ORDER BY mtime DESC, id DESC LIMIT 1 OFFSET ?',
+    'SELECT * FROM items ORDER BY id DESC LIMIT 1 OFFSET ?',
     undef, $offset
   );
   attach_tags($row) if $row;
