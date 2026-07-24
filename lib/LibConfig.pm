@@ -9,10 +9,11 @@ our @EXPORT_OK = qw(
 );
 
 use constant {
-  DEFAULT_LIBRARY => '/share/3d',
-  BAMBU_STUDIO    => '/usr/local/bin/bambu-studio',
-  DEFAULT_FREECAD => 'freecad',
-  DEFAULT_PORT    => 31353,
+  DEFAULT_LIBRARY      => '/share/3d',
+  DEFAULT_DOWNLOAD_DIR => '/share/tmp',
+  BAMBU_STUDIO         => '/usr/local/bin/bambu-studio',
+  DEFAULT_FREECAD      => 'freecad',
+  DEFAULT_PORT         => 31353,
 };
 
 # Primary model / CAD extensions (lowercase, no dot)
@@ -40,6 +41,18 @@ our %TYPE_DIRS = (
 sub library_root () {
   my $cfg = load_config();
   return $cfg->{library_root} // DEFAULT_LIBRARY;
+}
+
+# Destination for non-3D zips (and other “not a library model” drops).
+# Env: THREEDLIB_DOWNLOAD_DIR; config: download_dir. Default /share/tmp.
+sub download_dir () {
+  my $cfg = load_config();
+  my $v =
+       $ENV{THREEDLIB_DOWNLOAD_DIR}
+    // $cfg->{download_dir}
+    // DEFAULT_DOWNLOAD_DIR;
+  $v =~ s/^\s+|\s+\z//g if defined $v;
+  return (defined $v && length $v) ? $v : DEFAULT_DOWNLOAD_DIR;
 }
 
 sub db_path () {

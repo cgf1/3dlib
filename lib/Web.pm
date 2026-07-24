@@ -411,11 +411,11 @@ sub _settings_save_form {
   my $cfg = LibConfig::read_config_file();
   $cfg = {} unless ref $cfg eq 'HASH';
 
-  for my $k (qw(library_root bambu_studio bind image_viewer freecad)) {
+  for my $k (qw(library_root bambu_studio bind image_viewer freecad download_dir)) {
     next unless exists $f{$k};
     my $v = $f{$k} // '';
     $v =~ s/^\s+|\s+\z//g;
-    if ($k eq 'image_viewer' || $k eq 'freecad') {
+    if ($k eq 'image_viewer' || $k eq 'freecad' || $k eq 'download_dir') {
       if (length $v) {
         $cfg->{$k} = $v;
       }
@@ -603,6 +603,12 @@ sub _page_settings {
         <input type="text" id="library_root" name="library_root" value="}
           . _esc($disk->{library_root} // $eff->{library_root} // '') . qq{"/>
         <div class="hint">Model library path. Default /share/3d.</div>
+      </div>
+      <div class="row">
+        <label class="field" for="download_dir">download_dir</label>
+        <input type="text" id="download_dir" name="download_dir" value="}
+          . _esc($disk->{download_dir} // $eff->{download_dir} // LibConfig::download_dir()) . qq{"/>
+        <div class="hint">Non-3D zips are moved here (intact). Default /share/tmp. Env: THREEDLIB_DOWNLOAD_DIR.</div>
       </div>
       <div class="row">
         <label class="field" for="bambu_studio">bambu_studio</label>

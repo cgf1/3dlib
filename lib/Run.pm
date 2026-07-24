@@ -137,6 +137,11 @@ sub run {
       }
       my $res = Import::import_path(path => $target, dryrun => 0, copy => 0);
       my $r = ref $res eq 'ARRAY' ? $res->[0] : $res;
+      # Non-3D zip parked in download_dir — nothing to open in Studio
+      if (($r->{action} // '') eq 'download') {
+        dry_print(0, "non-3D zip moved to ", ($r->{dest} // '(unknown)'));
+        return $r;
+      }
       $open_path = $r->{dest} // $target;
       $item_id   = $r->{item_id};
       if ($r->{existing}) {

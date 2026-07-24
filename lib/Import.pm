@@ -12,7 +12,7 @@ use Cwd qw(abs_path);
 use LibConfig qw(library_root);
 use Util qw(
   dry_print file_hash file_stat_info ensure_unique_path sanitize_filename
-  look_like_project path_ext classify_role read_text safe_rename_or_move
+  look_like_project path_ext classify_role read_text write_text safe_rename_or_move
   translate_name pick_import_basename human_size fmt_time now_ts text_for_db
 );
 use Meta ();
@@ -25,6 +25,14 @@ sub import_path {
   my $copy   = $o{copy} // 0;      # 0 = move (default)
   my $clean  = $o{clean} // 0;
   my $root   = library_root();
+
+  # Optional explicit source page URL (e.g. from browser / --source-url)
+  if (defined $o{source_url} && length $o{source_url}) {
+    $o{source_url} = Meta::canonicalize_source_url($o{source_url}) // $o{source_url};
+  }
+  else {
+    delete $o{source_url};
+  }
 
   # Normalize UTF-8 before path ops / DB storage (avoids "æé¾" mojibake)
   $path = text_for_db($path);
@@ -139,7 +147,7 @@ sub _import_project {
   $name_en =~ s/\s+/_/g;
   $name_en = 'project' unless length $name_en;
 
-  my $src = Meta::harvest_project_sources($dir);
+  my $src = Meta::merge_source_url(Meta::harvest_project_sources($dir), $o{source_url});
   my $dest = ensure_unique_path("$root/projects/$name_en");
 
   dry_print($dryrun, "project: $dir -> $dest");
@@ -169,6 +177,9 @@ sub _import_project {
     DB::log_rename($dir, $dest, 'project import');
   }
 
+  if ($o{source_url}) {
+    _write_source_url_file($dest, $src->{source_url}, $src->{urls});
+  }
   my $item_id = _catalog_project($dest, $name_keep // $name_orig, $src);
   DB::log_import(
     source => $dir, dest => $dest, action => ($copy ? 'copy-project' : 'move-project'),
@@ -277,6 +288,7 @@ sub _import_file {
   dry_print($dryrun, ($copy ? 'copy' : 'move'), " file: $file -> $dest");
 
   if ($dryrun) {
+    my $preview_src = _file_source_meta($meta3, $o{source_url});
     return {
       action => 'file',
       source => $file,
@@ -285,7 +297,7 @@ sub _import_file {
       dryrun => 1,
       name   => $name_en,
       design_model_id => $meta3->{design_model_id},
-      source_url => $meta3->{source_url},
+      source_url => $preview_src->{source_url},
     };
   }
 
@@ -296,12 +308,13 @@ sub _import_file {
   }
 
   my $st = file_stat_info($dest);
+  my $file_src = _file_source_meta($meta3, $o{source_url});
   my $summary = $meta3->{description} || $meta3->{title} || $display;
   my $desc = Meta::build_description(
     summary    => $summary,
     designer   => $meta3->{designer},
     license    => $meta3->{license},
-    source_url => $meta3->{source_url},
+    source_url => $file_src->{source_url},
     mtime      => $st->{mtime},
   );
   my ($desc_en, $desc_orig) = _maybe_translate_desc($desc);
@@ -314,9 +327,10 @@ sub _import_file {
     name_orig       => $name_keep,
     description     => $desc_en,
     description_orig => $desc_orig,
-    source_site     => $meta3->{source_site},
-    source_url      => $meta3->{source_url},
-    source_id       => $meta3->{source_id},
+    source_site     => $file_src->{source_site},
+    source_url      => $file_src->{source_url},
+    source_id       => $file_src->{source_id},
+    sources_json    => $file_src->{sources_json},
     design_model_id => $meta3->{design_model_id},
     download_uuid   => $bambu && $bambu->{download_uuid},
     mtime           => $st->{mtime},
@@ -353,6 +367,39 @@ sub _import_file {
   };
 }
 
+# True if the zip lists any model-ish members (stl, step, 3mf, …).
+# Uses Archive::Zip member list; falls back to `unzip -l`.
+sub zip_has_models {
+  my ($zipfile) = @_;
+  my $zip = Archive::Zip->new();
+  if ($zip->read($zipfile) == AZ_OK) {
+    for my $m ($zip->members) {
+      next if $m->isDirectory;
+      my $name = $m->fileName // next;
+      next if $name =~ m{(?:^|/)(?:\.|__MACOSX)};
+      my $ext = path_ext($name);
+      return 1 if LibConfig::is_model_ext($ext);
+    }
+    return 0;
+  }
+  # Fallback: parse unzip -l
+  open my $fh, '-|', 'unzip', '-l', '--', $zipfile
+    or return 0;
+  my $found = 0;
+  while (my $line = <$fh>) {
+    # "  1234  2024-01-01 12:00   path/to/file.stl"
+    next unless $line =~ m{\s(\S+\.\w+)\s*\z};
+    my $name = $1;
+    next if $name =~ m{(?:^|/)(?:\.|__MACOSX)};
+    if (LibConfig::is_model_ext(path_ext($name))) {
+      $found = 1;
+      last;
+    }
+  }
+  close $fh;
+  return $found;
+}
+
 sub _import_zip {
   my ($zipfile, %o) = @_;
   my $dryrun = $o{dryrun} // 0;
@@ -360,23 +407,32 @@ sub _import_zip {
   my $clean  = $o{clean} // 0;
   my $root   = library_root();
 
+  # Non-3D archive → park in download_dir (do not catalog)
+  unless (zip_has_models($zipfile)) {
+    return _import_zip_download($zipfile, %o);
+  }
+
   my $base = text_for_db(basename($zipfile));
   $base =~ s/\.zip$//i;
+  my $name_orig = $base;
   $base = sanitize_filename(translate_name($base));
-  my ($base_en) = _maybe_translate_name($base, $base);
+  my ($base_en) = _maybe_translate_name($base, $name_orig);
   $base_en = sanitize_filename($base_en);
   $base_en =~ s/\s+/_/g;
   $base_en = 'project' unless length $base_en;
 
   my $dest_proj = ensure_unique_path("$root/projects/$base_en");
-  dry_print($dryrun, "unpack zip: $zipfile -> $dest_proj");
+  dry_print($dryrun, "unpack 3D zip: $zipfile -> $dest_proj");
+  dry_print($dryrun, "  source-url: $o{source_url}") if $o{source_url};
 
   if ($dryrun) {
     return {
-      action => 'zip',
-      source => $zipfile,
-      dest   => $dest_proj,
-      dryrun => 1,
+      action     => 'zip',
+      source     => $zipfile,
+      dest       => $dest_proj,
+      dryrun     => 1,
+      source_url => $o{source_url},
+      name       => $base_en,
     };
   }
 
@@ -391,15 +447,22 @@ sub _import_zip {
     $zip->extractTree('', "$dest_proj/");
   }
 
-  # If zip had a single top-level dir, flatten
+  # Single top-level directory → promote contents (Printables/Thingiverse style)
   _maybe_flatten($dest_proj);
 
-  my $src = Meta::harvest_project_sources($dest_proj);
+  my $src = Meta::merge_source_url(
+    Meta::harvest_project_sources($dest_proj),
+    $o{source_url},
+  );
+  if ($o{source_url}) {
+    _write_source_url_file($dest_proj, $src->{source_url}, $src->{urls});
+  }
+
   my $item_id = _catalog_project($dest_proj, text_for_db(basename($zipfile)), $src);
 
   DB::log_import(
     source => $zipfile, dest => $dest_proj, action => 'unpack-zip',
-    item_id => $item_id, detail => $base
+    item_id => $item_id, detail => $base_en
   );
 
   if (!$copy) {
@@ -412,27 +475,136 @@ sub _import_zip {
   try { require Thumbs; Thumbs::ensure_item_thumb($item_id) } catch ($e) { warn "thumb: $e" };
 
   return {
-    action  => 'zip',
-    source  => $zipfile,
-    dest    => $dest_proj,
-    item_id => $item_id,
+    action     => 'zip',
+    source     => $zipfile,
+    dest       => $dest_proj,
+    item_id    => $item_id,
+    source_url => $src->{source_url},
+    name       => $base_en,
   };
 }
 
+# Non-3D zip: move/copy intact into download_dir (default /share/tmp).
+sub _import_zip_download {
+  my ($zipfile, %o) = @_;
+  my $dryrun = $o{dryrun} // 0;
+  my $copy   = $o{copy} // 0;
+  my $clean  = $o{clean} // 0;
+  my $dd     = LibConfig::download_dir();
+  make_path($dd) unless $dryrun;
+
+  my $dest = ensure_unique_path("$dd/" . text_for_db(basename($zipfile)));
+  dry_print($dryrun, "non-3D zip -> download_dir: $zipfile -> $dest");
+
+  if ($dryrun) {
+    return {
+      action  => 'download',
+      source  => $zipfile,
+      dest    => $dest,
+      dryrun  => 1,
+      reason  => 'no model files in zip',
+    };
+  }
+
+  $dest = safe_rename_or_move(
+    src => $zipfile, dest => $dest, copy => $copy, dryrun => 0
+  );
+  $dest = text_for_db($dest);
+
+  DB::log_import(
+    source => $zipfile, dest => $dest, action => 'zip-download',
+    item_id => undef, detail => 'no model files'
+  );
+
+  if ($clean && $copy && -e $zipfile) {
+    unlink($zipfile) or warn "clean zip $zipfile: $!\n";
+  }
+
+  return {
+    action  => 'download',
+    source  => $zipfile,
+    dest    => $dest,
+    reason  => 'no model files in zip',
+  };
+}
+
+# Promote a single top-level directory's contents into $dir (repeat once if nested).
 sub _maybe_flatten {
   my ($dir) = @_;
-  opendir my $dh, $dir or return;
-  my @ents = grep { $_ ne '.' && $_ ne '..' } readdir($dh);
-  closedir $dh;
-  return unless @ents == 1 && -d "$dir/$ents[0]";
-  my $inner = "$dir/$ents[0]";
-  opendir my $ih, $inner or return;
-  my @inner = grep { $_ ne '.' && $_ ne '..' } readdir($ih);
-  closedir $ih;
-  for my $e (@inner) {
-    rename("$inner/$e", "$dir/$e") or copy("$inner/$e", "$dir/$e");
+  for (1 .. 3) {
+    opendir my $dh, $dir or return;
+    my @ents = grep {
+      $_ ne '.' && $_ ne '..' && $_ ne '__MACOSX' && $_ !~ /^\./
+    } readdir($dh);
+    closedir $dh;
+    return unless @ents == 1 && -d "$dir/$ents[0]";
+    my $inner = "$dir/$ents[0]";
+    opendir my $ih, $inner or return;
+    my @inner = grep { $_ ne '.' && $_ ne '..' } readdir($ih);
+    closedir $ih;
+    for my $e (@inner) {
+      my $from = "$inner/$e";
+      my $to   = "$dir/$e";
+      if (-e $to) {
+        $to = ensure_unique_path($to);
+      }
+      rename($from, $to) or copy($from, $to);
+    }
+    remove_tree($inner);
   }
-  remove_tree($inner);
+}
+
+# Write/update project URL file. Prefer explicit primary; keep other harvested
+# lines that are not the same URL.
+sub _write_source_url_file {
+  my ($dir, $url, $extra) = @_;
+  return unless defined $url && length $url && -d $dir;
+  my $path = "$dir/URL";
+  my @lines = ($url);
+  my %seen  = ($url => 1);
+  if (ref $extra eq 'ARRAY') {
+    for my $u (@$extra) {
+      next unless defined $u && length $u;
+      next if $seen{$u}++;
+      push @lines, $u;
+    }
+  }
+  elsif (-f $path) {
+    my $old = read_text($path) // '';
+    for my $line (split /\n/, $old) {
+      $line =~ s/^\s+|\s+\z//g;
+      next unless length $line;
+      next if $seen{$line}++;
+      push @lines, $line;
+    }
+  }
+  eval {
+    write_text($path, join("\n", @lines) . "\n");
+    1;
+  } or do {
+    warn "could not write $path: $@\n";
+  };
+}
+
+# Prefer explicit --source-url; else 3MF meta; merge extras.
+sub _file_source_meta {
+  my ($meta3, $source_url) = @_;
+  $meta3 //= {};
+  my $base = {
+    source_url   => $meta3->{source_url},
+    source_site  => $meta3->{source_site},
+    source_id    => $meta3->{source_id},
+    urls         => $meta3->{source_url} ? [ $meta3->{source_url} ] : [],
+    sources_json => undef,
+  };
+  return Meta::merge_source_url($base, $source_url) if $source_url;
+  if ($base->{source_url}) {
+    $base->{source_url} = Meta::canonicalize_source_url($base->{source_url})
+      // $base->{source_url};
+    $base->{source_site} //= Meta::classify_site($base->{source_url});
+    $base->{source_id}   //= Meta::_id_from_url($base->{source_url});
+  }
+  return $base;
 }
 
 sub _catalog_project {

@@ -199,7 +199,7 @@ USAGE
 
 sub cmd_import {
   my @args = @_;
-  my ($dryrun, $move, $copy, $clean, $quiet);
+  my ($dryrun, $move, $copy, $clean, $quiet, $source_url);
   my $usage = <<'USAGE';
 Usage: 3dlib import PATH [options]
 
@@ -207,17 +207,26 @@ Usage: 3dlib import PATH [options]
   Default is to MOVE the source into the library.
   Prints a detailed summary per item unless --quiet is given.
 
+  Zip handling:
+    - Zip containing 3D models (stl/step/3mf/…) → unpack into projects/,
+      flatten a single top-level folder, catalog, optional URL file.
+    - Zip with no model files → move intact to download_dir
+      (default /share/tmp; config download_dir / THREEDLIB_DOWNLOAD_DIR).
+
 Options:
   --clean               After success: remove source (with --copy) or
                         empty leftover dirs (with --move on directories)
   --copy                Copy into library; leave source in place
   --dryrun, --dry-run   Describe actions only; do not change files
   --move                Move into library (default)
+  --source-url URL      Primary page URL for this import (canonicalized
+                        for MakerWorld/CDN forms). Sets catalog primary
+                        and writes/updates a project URL file.
   -q, --quiet           One-line results only (no per-item detail)
   -h, --help            Show this help
 
 PATH:
-  Single 3D file (.3mf .stl .step .fcstd ...) or a .zip (auto-unpacked)
+  Single 3D file (.3mf .stl .step .fcstd ...) or a .zip
   Directory: only 3D files / project-like subdirs / zips are imported
 USAGE
   parse_opts(
@@ -227,6 +236,7 @@ USAGE
     'copy!'          => \$copy,
     'clean'          => \$clean,
     'quiet|q'        => \$quiet,
+    'source-url=s'   => \$source_url,
   );
 
   my $path = shift @args
@@ -242,12 +252,14 @@ USAGE
   }
 
   ensure_db();
-  my $res = Import::import_path(
+  my %imp = (
     path   => $path,
     dryrun => $dryrun ? 1 : 0,
     copy   => $do_copy,
     clean  => $clean ? 1 : 0,
   );
+  $imp{source_url} = $source_url if defined $source_url && length $source_url;
+  my $res = Import::import_path(%imp);
   _print_results($res, quiet => $quiet ? 1 : 0);
 }
 
@@ -905,13 +917,18 @@ Usage: 3dlib install-handler
     x-scheme-handler/bambustudio   (MakerWorld + web "Open in Bambu Studio")
     x-scheme-handler/freecad       (web "Open in FreeCAD")
     x-scheme-handler/3dlib         (optional unified 3dlib://studio/ID)
+    application/zip                (3D zips → library; others → download_dir)
 
   Handlers run in your desktop session (correct DISPLAY / xpra), then:
     3dlib run 'bambustudio://library/ID'
     3dlib run 'freecad://library/ID'
+    3dlib import PATH              (zip / model file open)
 
   Restore Bambu Studio handler example:
     xdg-mime default OrcaSlicer.desktop x-scheme-handler/bambustudio
+
+  Restore system zip handler example:
+    xdg-mime default org.gnome.FileRoller.desktop application/zip
 
 Options:
   -h, --help    Show this help
@@ -947,6 +964,20 @@ StartupNotify=false
 NoDisplay=false
 EOF
 
+  my $zip = <<'EOF';
+[Desktop Entry]
+Name=3dlib (Import zip)
+Comment=Import 3D model zips into the library; non-3D zips go to download_dir
+Exec=/usr/local/bin/3dlib import %f
+Terminal=false
+Type=Application
+MimeType=application/zip;application/x-zip;application/x-zip-compressed;application/x-compressed-zip;
+Categories=Graphics;3DGraphics;Utility;
+Keywords=3D;Printing;zip;import;3dlib
+StartupNotify=false
+NoDisplay=false
+EOF
+
   my $dir = ($ENV{HOME} // die "HOME not set\n") . '/.local/share/applications';
   make_path($dir);
 
@@ -954,6 +985,7 @@ EOF
   for my $pair (
     [ '3dlib-bambu.desktop',   $bambu ],
     [ '3dlib-freecad.desktop', $freecad ],
+    [ '3dlib-zip.desktop',     $zip ],
   ) {
     my ($name, $body) = @$pair;
     my $path = "$dir/$name";
@@ -978,6 +1010,8 @@ EOF
     [ '3dlib-bambu.desktop',   'x-scheme-handler/bambustudio' ],
     [ '3dlib-bambu.desktop',   'x-scheme-handler/3dlib' ],
     [ '3dlib-freecad.desktop', 'x-scheme-handler/freecad' ],
+    [ '3dlib-zip.desktop',     'application/zip' ],
+    [ '3dlib-zip.desktop',     'application/x-zip-compressed' ],
   );
   for my $s (@schemes) {
     my ($desk, $mime) = @$s;
@@ -995,10 +1029,12 @@ EOF
   say "Verify:";
   say "  xdg-mime query default x-scheme-handler/bambustudio";
   say "  xdg-mime query default x-scheme-handler/freecad";
+  say "  xdg-mime query default application/zip";
   say "Test:";
   say "  3dlib run 'bambustudio://library/1'";
   say "  3dlib run 'freecad://library/1'";
   say "  xdg-open 'bambustudio://library/1'";
+  say "  3dlib import /path/to/models.zip --dryrun";
 }
 
 

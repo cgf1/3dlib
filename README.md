@@ -63,7 +63,7 @@ sudo systemctl reload 3dlib
 3dlib help
 man 3dlib
 3dlib init
-3dlib import PATH [--dryrun] [--copy|--move] [--clean]
+3dlib import PATH [--dryrun] [--copy|--move] [--clean] [--source-url URL]
 3dlib delete ID|PATH [--dryrun] [--keep-files]
 3dlib edit ID|PATH --url URL [--description TEXT] [--name TEXT] …
 3dlib show ID|PATH          # details + open thumbnail (feh by default)
@@ -72,6 +72,31 @@ man 3dlib
 3dlib ls --tag clasp
 3dlib tags                  # list all tags
 3dlib serve
+```
+
+### Import zips
+
+```bash
+# 3D zip (contains stl/step/3mf/…) → projects/, flatten one top-level dir, catalog
+3dlib import ~/Downloads/widget.zip --source-url 'https://www.printables.com/model/123'
+
+# MakerWorld CDN / asset URLs are canonicalized to the public model page
+3dlib import model.zip --source-url \
+  'https://makerworld.bblmw.com/makerworld/model/DSM00000002755057/design/x.jpg'
+# stores: https://makerworld.com/en/models/2755057
+
+# Non-3D zip (no model members) → moved intact to download_dir (default /share/tmp)
+3dlib import random-docs.zip
+```
+
+Config / env for the non-3D landing pad:
+
+```json
+{ "download_dir": "/share/tmp" }
+```
+
+```bash
+export THREEDLIB_DOWNLOAD_DIR=/share/tmp
 ```
 
 Thumbnail viewer for `show` / `describe --view`:
@@ -91,6 +116,7 @@ xpra), and `3dlib` launches the app:
 |--------|-----|---------|
 | Open in Bambu Studio | `bambustudio://library/ID` | `x-scheme-handler/bambustudio` |
 | Open in FreeCAD | `freecad://library/ID` | `x-scheme-handler/freecad` |
+| Open a `.zip` | file path | `application/zip` → `3dlib import` |
 
 Register once per user desktop:
 
@@ -99,6 +125,7 @@ Register once per user desktop:
 # verify:
 xdg-mime query default x-scheme-handler/bambustudio
 xdg-mime query default x-scheme-handler/freecad
+xdg-mime query default application/zip
 ```
 
 CLI (same path the handlers use):

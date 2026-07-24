@@ -56,8 +56,31 @@ the source.  Prints a detailed per-item summary (name, source URL, size,
 thumb, description snippet) unless
 .B \-\-quiet
 is given.  Directory imports only take 3D-related content; a single non-3D
-file is an error.  Zips are unpacked into
-.BR projects/ .
+file is an error.
+.IP
+.B Zip handling:
+member list is inspected (like
+.BR unzip\ \-l ).
+If any model extension is present (stl, step, 3mf, \.\.\.), the archive is
+unpacked under
+.BR projects/ ,
+a single top-level folder is flattened, and the project is cataloged.
+Optional
+.B \-\-source\-url
+sets the primary page URL (MakerWorld CDN forms are canonicalized to
+.BR https://makerworld.com/en/models/ID )
+and writes a
+.B URL
+file when missing.
+Zips with no model files are moved intact to
+.B download_dir
+(default
+.BR /share/tmp ;
+config key
+.B download_dir
+or env
+.BR THREEDLIB_DOWNLOAD_DIR ).
+.IP
 Duplicates (content hash or MakerWorld DesignModelId) re-use the existing
 catalog entry.
 .TP
@@ -286,6 +309,11 @@ After a successful import, remove the source (with
 or empty leftovers (with directory
 .BR \-\-move ).
 .TP
+.BI \-\-source\-url " URL"
+With
+.BR import ,
+set the primary source page URL (canonicalized for MakerWorld/CDN forms).
+.TP
 .B \-\-keep\-files
 With
 .BR delete ,
@@ -302,11 +330,17 @@ Unknown options are rejected and the command does nothing (exit status 2).
 .I /share/3d
 Library root (models, projects, database, thumbs).
 .TP
+.I /share/tmp
+Default
+.B download_dir
+for non-3D zips.
+.TP
 .I /share/3d/.library/library.db
 SQLite catalog.
 .TP
 .I /share/3d/.library/config.json
-Optional configuration (bind address, port, studio path).
+Optional configuration (bind address, port, studio path,
+.BR download_dir ).
 .TP
 .I /share/3d/.library/renames.jsonl
 Rename audit log.

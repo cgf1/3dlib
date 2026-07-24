@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=3dlib (Import zip)
+Comment=Import 3D model zips into the library; non-3D zips go to download_dir
+Exec=/usr/local/bin/3dlib import %f
+Terminal=false
+Type=Application
+MimeType=application/zip;application/x-zip;application/x-zip-compressed;application/x-compressed-zip;
+Categories=Graphics;3DGraphics;Utility;
+Keywords=3D;Printing;zip;import;3dlib
+StartupNotify=false
+NoDisplay=false

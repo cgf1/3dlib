@@ -135,6 +135,41 @@ sub makerworld_public_url {
   return 'https://makerworld.com/en/models/' . $o{design_model_id};
 }
 
+# Normalize a source URL for catalog storage.
+# - MakerWorld page URLs → stable https://makerworld.com/en/models/<id>
+# - CDN embeds (makerworld.bblmw.com/.../model/DSM… or US…) → public page
+# - Other sites left as-is (trimmed, https:// if scheme missing)
+sub canonicalize_source_url {
+  my ($url) = @_;
+  return unless defined $url;
+  $url =~ s/^\s+|\s+\z//g;
+  return unless length $url;
+  $url = "https://$url" if $url !~ m{^[a-z][a-z0-9+.-]*:}i;
+
+  # Already a MakerWorld model page?
+  if (my $mw = parse_makerworld_url($url)) {
+    return $mw->{source_url} if $mw->{source_url};
+  }
+
+  # CDN / asset hosts: .../makerworld/model/DSM00000002755057/... or .../model/USxxxx/...
+  if ($url =~ m{(?:bblmw\.com|makerworld\.com|bambulab\.com)}i) {
+    if ($url =~ m{/model/(DSM0*\d+)}i) {
+      my $num = dsm_to_numeric($1);
+      return makerworld_public_url(numeric_id => $num) if $num;
+    }
+    if ($url =~ m{/model/(US[A-Za-z0-9]+)}i) {
+      return makerworld_public_url(design_model_id => $1);
+    }
+    # Bare DSM id anywhere in the URL
+    if ($url =~ m{\b(DSM0*\d+)\b}i) {
+      my $num = dsm_to_numeric($1);
+      return makerworld_public_url(numeric_id => $num) if $num;
+    }
+  }
+
+  return $url;
+}
+
 sub extract_3mf_thumb_to {
   my ($path, $outfile) = @_;
   my $zip = Archive::Zip->new();
@@ -249,27 +284,66 @@ sub harvest_project_sources {
     my $t = read_text($f);
     push @urls, harvest_urls_from_text($t) if $t;
   }
-  # unique preserve order
+  # Canonicalize + unique preserve order
   my %seen;
-  @urls = grep { !$seen{$_}++ } @urls;
-  my $primary = $urls[0];
+  my @canon;
+  for my $u (@urls) {
+    my $c = canonicalize_source_url($u) // $u;
+    next unless defined $c && length $c;
+    next if $seen{$c}++;
+    push @canon, $c;
+  }
+  my $primary = $canon[0];
   return {
-    urls        => \@urls,
-    source_url  => $primary,
-    source_site => $primary ? classify_site($primary) : undef,
-    source_id   => _id_from_url($primary),
-    sources_json => @urls ? _json_array(@urls) : undef,
+    urls         => \@canon,
+    source_url   => $primary,
+    source_site  => $primary ? classify_site($primary) : undef,
+    source_id    => ($primary ? _id_from_url($primary) : undef),
+    sources_json => (@canon ? _json_array(@canon) : undef),
+  };
+}
+
+# Merge an explicit --source-url (or handler URL) over harvested sources.
+# Preferential primary; append harvested URLs as extras.
+sub merge_source_url {
+  my ($src, $url) = @_;
+  $src = {} unless ref $src eq 'HASH';
+  return $src unless defined $url && length $url;
+  my $primary = canonicalize_source_url($url) // $url;
+  $primary =~ s/^\s+|\s+\z//g;
+  return $src unless length $primary;
+
+  my @urls = ($primary);
+  my %seen = ($primary => 1);
+  for my $u (@{ $src->{urls} // [] }) {
+    next unless defined $u && length $u;
+    my $c = canonicalize_source_url($u) // $u;
+    next if $seen{$c}++;
+    push @urls, $c;
+  }
+  if ($src->{source_url}) {
+    my $c = canonicalize_source_url($src->{source_url}) // $src->{source_url};
+    unless ($seen{$c}++) {
+      push @urls, $c;
+    }
+  }
+  return {
+    urls         => \@urls,
+    source_url   => $primary,
+    source_site  => classify_site($primary) // undef,
+    source_id    => (_id_from_url($primary) // undef),
+    sources_json => (_json_array(@urls) // undef),
   };
 }
 
 sub _id_from_url {
   my ($url) = @_;
-  return unless $url;
+  return undef unless $url;
   return $1 if $url =~ /thingiverse\.com\/thing:(\d+)/i;
   return $1 if $url =~ /printables\.com\/model\/(\d+)/i;
   return $1 if $url =~ /makerworld\.com\/(?:en|zh)\/models\/([A-Za-z0-9_-]+)/i;
   return $1 if $url =~ /cults3d\.com\/[^\/]+\/3d-model\/([^\/\?]+)/i;
-  return;
+  return undef;
 }
 
 sub _json_array {
