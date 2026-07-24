@@ -23,17 +23,8 @@ sub delete_items {
   my @results;
   for my $t (@$targets) {
     $t = text_for_db($t);
-    my $row;
-    if ($t =~ /^\d+$/) {
-      $row = DB::get_item($t);
-      die "No item with id $t\n" unless $row;
-    }
-    else {
-      my $ap = abs_path($t) // $t;
-      $ap = text_for_db($ap);
-      $row = DB::find_by_path($ap) // DB::find_by_path($t);
-      die "Not in catalog: $t\n" unless $row;
-    }
+    my $row = DB::resolve_item_ref($t);
+    die "Not in catalog: $t\n" unless $row;
 
     my \%it = $row;
     my $path = $it{path} // '';

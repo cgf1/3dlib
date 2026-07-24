@@ -179,21 +179,14 @@ sub _source_mtime {
   return $mt;
 }
 
-# Resolve CLI targets (numeric ids or paths) to item ids.
+# Resolve CLI targets (ids, paths, or latest / latest-N) to item ids.
 sub resolve_targets {
   my (@targets) = @_;
   require Util;
   my @ids;
   for my $t (@targets) {
     $t = Util::text_for_db($t);
-    if ($t =~ /^\d+$/) {
-      push @ids, 0 + $t;
-      next;
-    }
-    require Cwd;
-    my $ap = Cwd::abs_path($t) // $t;
-    $ap = Util::text_for_db($ap);
-    my $row = DB::find_by_path($ap) // DB::find_by_path($t);
+    my $row = DB::resolve_item_ref($t);
     die "Not in catalog: $t\n" unless $row;
     push @ids, $row->{id};
   }

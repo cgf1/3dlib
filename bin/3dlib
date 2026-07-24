@@ -267,8 +267,8 @@ sub cmd_delete {
   my @args = @_;
   my ($dryrun, $keep_files);
   my $usage = <<'USAGE';
-Usage: 3dlib delete ID|PATH... [options]
-       3dlib rm     ID|PATH... [options]
+Usage: 3dlib delete ID|PATH|latest[-N]... [options]
+       3dlib rm     ID|PATH|latest[-N]... [options]
 
   Remove one or more items from the catalog.  By default also deletes the
   corresponding files under /share/3d (and the thumbnail).  Paths outside the
@@ -304,7 +304,7 @@ sub cmd_edit {
   );
   my (@add_urls, @add_tags, @remove_tags);
   my $usage = <<'USAGE';
-Usage: 3dlib edit ID|PATH [options]
+Usage: 3dlib edit ID|PATH|latest[-N] [options]
 
   Update catalog metadata for one item (does not rename or move files).
   Only fields you pass are changed; omitted fields stay as they are.
@@ -639,7 +639,7 @@ sub cmd_describe {
   my $usage = <<'USAGE';
 Usage: 3dlib describe ID|PATH [options]
 
-  Show full catalog details for one item.
+  Show full catalog details for one item (also: latest, latest-N).
   Use --view (or the show command) to open the thumbnail in an image viewer.
 
 Options:
@@ -674,8 +674,9 @@ Usage: 3dlib show ID|PATH [options]
        3dlib inspect ID|PATH
        3dlib view ID|PATH
 
-  Print catalog details for one item and open its thumbnail in an image
-  viewer (default: feh).  Generates a missing/stale thumb when possible.
+  Print catalog details for one item (also: latest, latest-N) and open its
+  thumbnail in an image viewer (default: feh).  Generates a missing/stale
+  thumb when possible.
 
 Options:
   --no-view         Print details only (same as describe)
@@ -844,6 +845,10 @@ Usage: 3dlib run TARGET [options]
 TARGET:
   local path, catalog ID, MakerWorld https URL,
   bambustudio://…, freecad://…, or 3dlib://studio|freecad/ID
+  Recency (by mtime, newest first):
+    latest          newest item
+    latest-1        second newest
+    latest-2        third newest  (also latest~1, new, new-1)
 
 Options:
   --app studio|freecad  Application to launch (default: studio; freecad for .FCStd)

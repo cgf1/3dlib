@@ -191,10 +191,8 @@ sub from_row ($row) {
 }
 
 sub load ($id_or_path) {
-  my $row =
-      $id_or_path =~ /^\d+$/
-    ? DB::get_item($id_or_path)
-    : DB::find_by_path($id_or_path);
+  my $row = DB::resolve_item_ref($id_or_path);
+  return unless $row;
   return from_row($row);
 }
 
@@ -215,15 +213,7 @@ sub load ($id_or_path) {
 sub edit {
   my (%o) = @_;
   my $target = $o{target} // die "edit: target (id or path) required\n";
-  my $row;
-  if ($target =~ /^\d+$/) {
-    $row = DB::get_item($target);
-  }
-  else {
-    require Cwd;
-    my $ap = Cwd::abs_path($target) // $target;
-    $row = DB::find_by_path(text_for_db($ap)) // DB::find_by_path(text_for_db($target));
-  }
+  my $row = DB::resolve_item_ref($target);
   die "edit: not in catalog: $target\n" unless $row;
 
   my $id = $row->{id};

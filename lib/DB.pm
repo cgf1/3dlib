@@ -351,6 +351,66 @@ sub get_item {
   return $row;
 }
 
+# Newest-by-mtime catalog entry. $offset 0 = latest, 1 = second newest, …
+sub nth_newest {
+  my ($offset) = @_;
+  $offset = 0 unless defined $offset;
+  die "nth_newest: offset must be a non-negative integer\n"
+    unless $offset =~ /^\d+$/;
+  $offset = 0 + $offset;
+  my $row = dbh()->selectrow_hashref(
+    'SELECT * FROM items ORDER BY mtime DESC, id DESC LIMIT 1 OFFSET ?',
+    undef, $offset
+  );
+  attach_tags($row) if $row;
+  return $row;
+}
+
+# True if $spec is a recency alias (latest / latest-N / latest~N), not a path.
+sub is_recency_alias {
+  my ($spec) = @_;
+  return 0 unless defined $spec;
+  return $spec =~ /^(?:latest|new)(?:[-~]\d+)?\z/i ? 1 : 0;
+}
+
+# Parse latest / latest-0 / latest-2 / latest~1 / new / new-1 → offset or undef.
+sub recency_offset {
+  my ($spec) = @_;
+  return unless defined $spec;
+  return 0 if $spec =~ /^(?:latest|new)\z/i;
+  return 0 + $1 if $spec =~ /^(?:latest|new)[-~](\d+)\z/i;
+  return;
+}
+
+# Resolve catalog ref: recency alias, numeric id, or filesystem path → row or undef.
+# Dies on known alias that is out of range (empty catalog / offset too large).
+sub resolve_item_ref {
+  my ($spec) = @_;
+  return unless defined $spec && length $spec;
+
+  if (defined(my $off = recency_offset($spec))) {
+    my $row = nth_newest($off);
+    unless ($row) {
+      my $total = dbh()->selectrow_array('SELECT COUNT(*) FROM items') // 0;
+      my $label = $off == 0 ? 'latest' : "latest-$off";
+      die "No catalog item for $label (offset $off; catalog has $total item(s))\n";
+    }
+    return $row;
+  }
+
+  if ($spec =~ /^\d+$/) {
+    return get_item($spec);
+  }
+
+  require Cwd;
+  require Util;
+  my $ap = Cwd::abs_path($spec) // $spec;
+  my $row = find_by_path(Util::text_for_db($ap));
+  $row //= find_by_path(Util::text_for_db($spec));
+  attach_tags($row) if $row;
+  return $row;
+}
+
 # Partial update of catalog metadata (not path/files). Returns 1 if a row was updated.
 # Allowed keys: name, name_orig, description, description_orig, source_site, source_url,
 # source_id, sources_json, design_model_id, status.
