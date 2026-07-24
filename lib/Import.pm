@@ -147,10 +147,19 @@ sub _import_project {
   $name_en =~ s/\s+/_/g;
   $name_en = 'project' unless length $name_en;
 
-  my $src = Meta::merge_source_url(Meta::harvest_project_sources($dir), $o{source_url});
+  my $harvested = Meta::harvest_project_sources($dir);
+  my $inferred  = $o{source_url}
+    // $harvested->{source_url}
+    // Meta::guess_source_url(
+         names => [ basename($dir), $name_orig, $name_en ],
+       );
+  my $src = $inferred
+    ? Meta::merge_source_url($harvested, $inferred)
+    : $harvested;
   my $dest = ensure_unique_path("$root/projects/$name_en");
 
   dry_print($dryrun, "project: $dir -> $dest");
+  dry_print($dryrun, "  source-url: $src->{source_url}") if $src->{source_url};
 
   if ($dryrun) {
     return {
@@ -177,7 +186,7 @@ sub _import_project {
     DB::log_rename($dir, $dest, 'project import');
   }
 
-  if ($o{source_url}) {
+  if ($src->{source_url}) {
     _write_source_url_file($dest, $src->{source_url}, $src->{urls});
   }
   my $item_id = _catalog_project($dest, $name_keep // $name_orig, $src);
@@ -422,8 +431,12 @@ sub _import_zip {
   $base_en = 'project' unless length $base_en;
 
   my $dest_proj = ensure_unique_path("$root/projects/$base_en");
+  my $guessed_url = Meta::guess_source_url(
+    explicit => $o{source_url},
+    names    => [ basename($zipfile), $name_orig, $base_en ],
+  );
   dry_print($dryrun, "unpack 3D zip: $zipfile -> $dest_proj");
-  dry_print($dryrun, "  source-url: $o{source_url}") if $o{source_url};
+  dry_print($dryrun, "  source-url: $guessed_url") if $guessed_url;
 
   if ($dryrun) {
     return {
@@ -431,7 +444,7 @@ sub _import_zip {
       source     => $zipfile,
       dest       => $dest_proj,
       dryrun     => 1,
-      source_url => $o{source_url},
+      source_url => $guessed_url,
       name       => $base_en,
     };
   }
@@ -450,11 +463,22 @@ sub _import_zip {
   # Single top-level directory → promote contents (Printables/Thingiverse style)
   _maybe_flatten($dest_proj);
 
-  my $src = Meta::merge_source_url(
-    Meta::harvest_project_sources($dest_proj),
-    $o{source_url},
-  );
-  if ($o{source_url}) {
+  my $harvested = Meta::harvest_project_sources($dest_proj);
+  # Prefer: --source-url, then files inside zip (URL/README), then name guess
+  my $inferred = $o{source_url}
+    // $harvested->{source_url}
+    // Meta::guess_source_url(
+         names => [
+           basename($zipfile),
+           $name_orig,
+           basename($dest_proj),
+           _top_level_names($dest_proj),
+         ],
+       );
+  my $src = $inferred
+    ? Meta::merge_source_url($harvested, $inferred)
+    : $harvested;
+  if ($src->{source_url}) {
     _write_source_url_file($dest_proj, $src->{source_url}, $src->{urls});
   }
 
@@ -552,6 +576,16 @@ sub _maybe_flatten {
     }
     remove_tree($inner);
   }
+}
+
+# First-level entry names (for URL guessing after flatten).
+sub _top_level_names {
+  my ($dir) = @_;
+  return () unless $dir && -d $dir;
+  opendir my $dh, $dir or return ();
+  my @n = grep { $_ ne '.' && $_ ne '..' && $_ ne '__MACOSX' } readdir($dh);
+  closedir $dh;
+  return @n;
 }
 
 # Write/update project URL file. Prefer explicit primary; keep other harvested

@@ -80,6 +80,11 @@ man 3dlib
 # 3D zip (contains stl/step/3mf/…) → projects/, flatten one top-level dir, catalog
 3dlib import ~/Downloads/widget.zip --source-url 'https://www.printables.com/model/123'
 
+# Thingiverse / Printables: URL is inferred from the zip name when possible
+#   "Necklace clasp V2 - 4821608.zip" → https://www.thingiverse.com/thing:4821608
+#   "397679-some-model.zip"          → https://www.printables.com/model/397679
+# Also reads URL/README inside the archive; --source-url always wins.
+
 # MakerWorld CDN / asset URLs are canonicalized to the public model page
 3dlib import model.zip --source-url \
   'https://makerworld.bblmw.com/makerworld/model/DSM00000002755057/design/x.jpg'

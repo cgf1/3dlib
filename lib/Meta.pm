@@ -346,6 +346,70 @@ sub _id_from_url {
   return undef;
 }
 
+# Infer a source page URL from a download filename / folder name when the
+# zip has no URL file. Thingiverse: "Title - 4821608.zip". Printables: often
+# "397679-model-slug.zip". Returns undef if unsure.
+sub guess_source_url_from_name {
+  my ($name) = @_;
+  return unless defined $name && length $name;
+  require File::Basename;
+  my $base = File::Basename::basename($name);
+  $base =~ s/\.(?:zip|rar|7z)\z//i;
+  $base =~ s/^\s+|\s+\z//g;
+  return unless length $base;
+
+  # Explicit thing:NNNN in the name
+  if ($base =~ /\bthing:(\d{4,10})\b/i) {
+    return "https://www.thingiverse.com/thing:$1";
+  }
+
+  # Classic Thingiverse download: "Necklace clasp V2 - 4821608"
+  if ($base =~ /\s+-\s+(\d{5,10})\z/) {
+    return "https://www.thingiverse.com/thing:$1";
+  }
+
+  # Sanitized / alternate: "Necklace_clasp_V2_-_4821608" or "…_thing_4821608"
+  if ($base =~ /(?:^|[_-])thing(?:iverse)?[_-]?(\d{5,10})\z/i) {
+    return "https://www.thingiverse.com/thing:$1";
+  }
+  if ($base =~ /[_-](\d{5,10})\z/ && $base =~ /[_-]{1,2}\d{5,10}\z/) {
+    # Trailing id after underscore/dash (Thingiverse-style after sanitize)
+    # Require at least one letter in the stem so bare "123456.zip" is skipped
+    if ($base =~ /[A-Za-z].*[_-](\d{5,10})\z/) {
+      my $id = $1;
+      # Leading-id form is Printables (handled below); prefer TV for " - " style only.
+      # For "name_id" without leading digits, treat as Thingiverse.
+      unless ($base =~ /^\d{5,10}[_-]/) {
+        return "https://www.thingiverse.com/thing:$id";
+      }
+    }
+  }
+
+  # Printables: "397679-bracelet-clasp-…" or "397679_Something"
+  if ($base =~ /^(\d{5,10})[-_][A-Za-z0-9]/) {
+    return "https://www.printables.com/model/$1";
+  }
+  if ($base =~ /printables/i && $base =~ /(\d{5,10})/) {
+    return "https://www.printables.com/model/$1";
+  }
+  if ($base =~ /thingiverse/i && $base =~ /(\d{5,10})/) {
+    return "https://www.thingiverse.com/thing:$1";
+  }
+
+  return;
+}
+
+# If harvest found nothing, try filenames (zip name, project dir, members).
+sub guess_source_url {
+  my (%o) = @_;
+  return $o{explicit} if defined $o{explicit} && length $o{explicit};
+  for my $n (@{ $o{names} // [] }) {
+    my $g = guess_source_url_from_name($n);
+    return $g if $g;
+  }
+  return;
+}
+
 sub _json_array {
   require JSON::PP;
   return JSON::PP->new->utf8->encode([@_]);
