@@ -285,9 +285,14 @@ def _render_freecad(
     visible: bool = False,
     pad: float = 0.08,
 ) -> None:
-    freecad = _find_freecad()
+    # Always the FreeCAD binary from 3dlib config (or THREEDLIB_FREECAD),
+    # always --console (ednor wrapper → tomoon bwrap understands this).
+    freecad = _freecad_from_3dlib_config()
     if not freecad:
-        raise RuntimeError("FreeCAD not found")
+        raise RuntimeError(
+            "FreeCAD not configured: set freecad in /share/3d/.library/config.json "
+            "or THREEDLIB_FREECAD (e.g. /usr/local/bin/FreeCAD)"
+        )
 
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
@@ -358,50 +363,28 @@ print("ok", tmp)
         )
 
         env = os.environ.copy()
-        env.setdefault("QT_QPA_PLATFORM", "offscreen")
-        # Build argv lists for FreeCAD / FreeCADCmd. ednor's FreeCAD wrapper
-        # (ssh → tomoon bwrap) accepts --console for headless scripts.
-        candidates: list[list[str]] = []
-        seen: set[str] = set()
-        for bin_path in (freecad, *_freecad_bin_candidates()):
-            if not bin_path or bin_path in seen:
-                continue
-            seen.add(bin_path)
-            name = Path(bin_path).name.lower()
-            if "cmd" in name:
-                # FreeCADCmd: script path as argv
-                candidates.append([bin_path, str(script_path)])
-            else:
-                # FreeCAD (incl. remote wrapper): --console script.py
-                candidates.append([bin_path, "--console", str(script_path)])
-                candidates.append([bin_path, "-c", str(script_path)])
-                candidates.append([bin_path, str(script_path)])
+        # Wrapper finds SSH_AUTH_SOCK / DISPLAY itself (procenv / xpra / :10).
+        cmd = [freecad, "--console", str(script_path)]
+        try:
+            proc = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=300,
+            )
+        except FileNotFoundError as e:
+            raise RuntimeError(f"FreeCAD not executable: {freecad}: {e}") from e
+        except subprocess.TimeoutExpired as e:
+            raise RuntimeError(
+                f"FreeCAD conversion timed out ({freecad} --console …)"
+            ) from e
 
-        last = None
-        for cmd in candidates:
-            try:
-                last = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    env=env,
-                    timeout=300,
-                )
-            except FileNotFoundError:
-                continue
-            except subprocess.TimeoutExpired as e:
-                last = e
-                continue
-            if tmp_stl.is_file() and tmp_stl.stat().st_size > 0:
-                break
-        else:
-            detail = ""
-            if last is not None:
-                if isinstance(last, subprocess.TimeoutExpired):
-                    detail = "timeout"
-                else:
-                    detail = (last.stderr or last.stdout or "")[-800:]
-            raise RuntimeError(f"FreeCAD conversion failed: {detail}")
+        if not (tmp_stl.is_file() and tmp_stl.stat().st_size > 0):
+            detail = (proc.stderr or proc.stdout or "")[-800:]
+            raise RuntimeError(
+                f"FreeCAD conversion failed ({freecad} --console): {detail}"
+            )
 
         try:
             _render_trimesh(tmp_stl, out, size, visible=visible, pad=pad)
@@ -409,69 +392,45 @@ print("ok", tmp)
             _render_simple(tmp_stl, out, size)
 
 
-def _freecad_bin_candidates() -> list[str]:
-    """Ordered FreeCAD binaries for mesh-preview (wrapper first on this host)."""
-    return [
-        "/usr/local/bin/FreeCAD",  # ednor → tomoon bwrap wrapper
-        "/usr/local/bin/freecad",
-        "FreeCAD",
-        "freecad",
-        "freecadcmd",
-        "FreeCADCmd",
-        "/usr/bin/freecadcmd",
-        "/usr/local/bin/freecadcmd",
-        "/usr/bin/FreeCADCmd",
-        "/usr/local/thunder/usr/bin/FreeCADCmd",  # legacy local
-        "/usr/bin/freecad",
-    ]
-
-
 def _freecad_from_3dlib_config() -> str | None:
-    """First token of 3dlib freecad config / THREEDLIB_FREECAD if it's a path/binary."""
+    """FreeCAD binary from 3dlib config / THREEDLIB_FREECAD only.
+
+    Config may be a full template like \"/usr/local/bin/FreeCAD {{file}}\";
+    we take the first token (the executable).
+    """
     raw = os.environ.get("THREEDLIB_FREECAD")
     if not raw:
-        cfg_path = Path(os.environ.get("THREEDLIB_ROOT", "/share/3d")) / ".library" / "config.json"
-        # Also try default library root
-        for p in (cfg_path, Path("/share/3d/.library/config.json")):
-            if p.is_file():
-                try:
-                    import json
+        roots = []
+        if os.environ.get("THREEDLIB_ROOT"):
+            roots.append(Path(os.environ["THREEDLIB_ROOT"]))
+        roots.append(Path("/share/3d"))
+        for root in roots:
+            p = root / ".library" / "config.json"
+            if not p.is_file():
+                continue
+            try:
+                import json
 
-                    j = json.loads(p.read_text(encoding="utf-8"))
-                    raw = j.get("freecad") or (j.get("tools") or {}).get("freecad")
-                    if raw:
-                        break
-                except Exception:
-                    pass
+                j = json.loads(p.read_text(encoding="utf-8"))
+                raw = j.get("freecad") or (j.get("tools") or {}).get("freecad")
+                if raw:
+                    break
+            except Exception:
+                pass
     if not raw:
         return None
     raw = str(raw).strip()
-    # "/usr/local/bin/FreeCAD {file}" → binary only
     tok = raw.split()[0] if raw else ""
-    if tok and Path(tok).is_file() and os.access(tok, os.X_OK):
-        return tok
-    return None
-
-
-def _find_freecad() -> str | None:
-    # Prefer 3dlib config / local FreeCAD wrapper (remote tomoon), not legacy FreeCADCmd.
-    ordered = []
-    cfg = _freecad_from_3dlib_config()
-    if cfg:
-        ordered.append(cfg)
-    ordered.extend(_freecad_bin_candidates())
-    seen: set[str] = set()
-    for name in ordered:
-        if not name or name in seen:
-            continue
-        seen.add(name)
-        path = Path(name)
-        if path.is_file() and os.access(path, os.X_OK):
-            return str(path)
-        found = subprocess.run(["which", name], capture_output=True, text=True)
-        if found.returncode == 0 and found.stdout.strip():
-            return found.stdout.strip()
-    return None
+    if not tok:
+        return None
+    path = Path(tok)
+    if path.is_file() and os.access(path, os.X_OK):
+        return str(path.resolve())
+    found = subprocess.run(["which", tok], capture_output=True, text=True)
+    if found.returncode == 0 and found.stdout.strip():
+        return found.stdout.strip()
+    # Allow configured path even if not yet executable (clearer error later)
+    return tok if path.is_absolute() else None
 
 
 if __name__ == "__main__":
