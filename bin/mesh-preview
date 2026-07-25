@@ -293,44 +293,59 @@ def _render_freecad(
         td_path = Path(td)
         tmp_stl = td_path / "out.stl"
         script_path = td_path / "preview.py"
+        # Native .FCStd must use openDocument; Import/Mesh.insert are for STEP/STL/etc.
         script_path.write_text(
             f"""
 import sys
+import os
 import FreeCAD
-import Import
 import Mesh
 import MeshPart
 
 inp = {str(inp)!r}
 tmp = {str(tmp_stl)!r}
+ext = os.path.splitext(inp)[1].lower()
 
-doc = FreeCAD.newDocument("preview")
-loaded = False
-for loader in (Import.insert, Mesh.insert):
+doc = None
+if ext == ".fcstd":
     try:
-        loader(inp, doc.Name)
-        loaded = True
-        break
+        doc = FreeCAD.openDocument(inp)
     except Exception as e:
-        print("loader failed", loader, e, file=sys.stderr)
-if not loaded:
-    raise SystemExit("FreeCAD could not load " + inp)
+        print("openDocument failed:", e, file=sys.stderr)
+        raise SystemExit("FreeCAD could not open FCStd: " + inp)
+else:
+    import Import
+    doc = FreeCAD.newDocument("preview")
+    loaded = False
+    for loader in (Import.insert, Mesh.insert):
+        try:
+            loader(inp, doc.Name)
+            loaded = True
+            break
+        except Exception as e:
+            print("loader failed", loader, e, file=sys.stderr)
+    if not loaded:
+        raise SystemExit("FreeCAD could not load " + inp)
 
 doc.recompute()
 for obj in list(doc.Objects):
     try:
-        if hasattr(obj, "Shape") and not obj.isDerivedFrom("Mesh::Feature"):
-            m = doc.addObject("Mesh::Feature", obj.Name + "_mesh")
-            m.Mesh = MeshPart.meshFromShape(
-                Shape=obj.Shape, LinearDeflection=0.1, AngularDeflection=0.5
-            )
+        if obj.isDerivedFrom("Mesh::Feature"):
+            continue
+        shape = getattr(obj, "Shape", None)
+        if shape is None or shape.isNull():
+            continue
+        m = doc.addObject("Mesh::Feature", obj.Name + "_mesh")
+        m.Mesh = MeshPart.meshFromShape(
+            Shape=shape, LinearDeflection=0.15, AngularDeflection=0.5
+        )
     except Exception as e:
-        print("tessellate skip", obj.Name, e, file=sys.stderr)
+        print("tessellate skip", getattr(obj, "Name", "?"), e, file=sys.stderr)
 doc.recompute()
 
 meshes = [o for o in doc.Objects if o.isDerivedFrom("Mesh::Feature")]
 if not meshes:
-    raise SystemExit("no meshes produced")
+    raise SystemExit("no meshes produced from " + inp)
 base = meshes[0].Mesh.copy()
 for m in meshes[1:]:
     try:
@@ -344,14 +359,20 @@ print("ok", tmp)
 
         env = os.environ.copy()
         env.setdefault("QT_QPA_PLATFORM", "offscreen")
-        # Prefer FreeCADCmd for headless
-        candidates = []
-        if "cmd" in Path(freecad).name.lower():
-            candidates.append([freecad, str(script_path)])
-        else:
-            candidates.append([freecad, "-c", str(script_path)])
-            for alt in ("freecadcmd", "FreeCADCmd", "/usr/bin/freecadcmd"):
-                candidates.append([alt, str(script_path)])
+        # Prefer FreeCADCmd for headless (script path as argv, not -c file)
+        candidates: list[list[str]] = []
+        seen: set[str] = set()
+        for bin_path in (freecad, *_freecad_cmd_candidates()):
+            if not bin_path or bin_path in seen:
+                continue
+            seen.add(bin_path)
+            name = Path(bin_path).name.lower()
+            if "cmd" in name:
+                candidates.append([bin_path, str(script_path)])
+            else:
+                # GUI FreeCAD: console-run script (may be slower / need display)
+                candidates.append([bin_path, "-c", str(script_path)])
+                candidates.append([bin_path, str(script_path)])
 
         last = None
         for cmd in candidates:
@@ -365,12 +386,18 @@ print("ok", tmp)
                 )
             except FileNotFoundError:
                 continue
+            except subprocess.TimeoutExpired as e:
+                last = e
+                continue
             if tmp_stl.is_file() and tmp_stl.stat().st_size > 0:
                 break
         else:
             detail = ""
             if last is not None:
-                detail = (last.stderr or last.stdout or "")[-800:]
+                if isinstance(last, subprocess.TimeoutExpired):
+                    detail = "timeout"
+                else:
+                    detail = (last.stderr or last.stdout or "")[-800:]
             raise RuntimeError(f"FreeCAD conversion failed: {detail}")
 
         try:
@@ -379,15 +406,25 @@ print("ok", tmp)
             _render_simple(tmp_stl, out, size)
 
 
-def _find_freecad() -> str | None:
-    for name in (
+def _freecad_cmd_candidates() -> list[str]:
+    return [
         "freecadcmd",
         "FreeCADCmd",
+        "/usr/local/thunder/usr/bin/FreeCADCmd",
         "/usr/bin/freecadcmd",
         "/usr/local/bin/freecadcmd",
+        "/usr/bin/FreeCADCmd",
+    ]
+
+
+def _find_freecad() -> str | None:
+    # Prefer headless FreeCADCmd for mesh-preview (avoids GUI hang).
+    for name in (
+        *_freecad_cmd_candidates(),
         "freecad",
         "FreeCAD",
         "/usr/local/bin/freecad",
+        "/usr/local/bin/FreeCAD",
         "/usr/bin/freecad",
     ):
         path = Path(name)
