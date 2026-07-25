@@ -83,6 +83,9 @@ start_pre() {
 	checkconfig || return $?
 	checkpath --file --owner "${THREEDLIB_USER}:${THREEDLIB_GROUP}" \
 		--mode 0644 "${THREEDLIB_LOG}" 2>/dev/null || true
+	# Launch diagnostics (FreeCAD/Studio open from web + CLI)
+	checkpath --file --owner "${THREEDLIB_USER}:${THREEDLIB_GROUP}" \
+		--mode 0644 /var/log/3dlib.log 2>/dev/null || true
 }
 
 stop_pre() {

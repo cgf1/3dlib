@@ -249,13 +249,17 @@ sub _handle {
     return _send($c, 200, 'application/json',
       JSON::PP->new->utf8->encode(DB::stats()));
   }
-  # Open: default is desktop URL scheme (browser → xdg handler → 3dlib run).
-  # mode=direct forces server-side launch (usually wrong for DISPLAY; kept for debugging).
+  # Open apps:
+  #   studio default mode=url  → bambustudio:// desktop handler (user session DISPLAY)
+  #   freecad default mode=direct → server runs freecad cmd (often ssh + DISPLAY=:10 on tomoon)
+  #   mode=direct always server-side; mode=url always scheme handler
   if ($path eq '/open' || $path eq '/api/open') {
     my %f = $r->method eq 'POST' ? _parse_form($r) : ();
     my $id   = $f{id}  // $qp{id}  or die "missing id\n";
-    my $app  = $f{app} // $qp{app} // 'studio';
-    my $mode = lc($f{mode} // $qp{mode} // 'url');
+    my $app  = lc($f{app} // $qp{app} // 'studio');
+    $app = 'freecad' if $app eq 'fc' || $app eq 'fcstd';
+    my $default_mode = ($app eq 'freecad') ? 'direct' : 'url';
+    my $mode = lc($f{mode} // $qp{mode} // $default_mode);
     if ($mode ne 'direct') {
       my $url = Meta::library_open_url(id => $id, app => $app);
       if (($qp{format} // $f{format} // '') eq 'json'
@@ -278,9 +282,38 @@ sub _handle {
         extra_headers => { Location => $url },
       );
     }
-    my $res = Run::run(target => $id, no_import => 1, app => $app);
-    return _send($c, 200, 'application/json',
+    my $res;
+    try {
+      $res = Run::run(target => $id, no_import => 1, app => $app);
+    }
+    catch ($e) {
+      $e =~ s/\s+\z//;
+      Run::launch_log("ERROR /open id=$id app=$app: $e");
+      return _send($c, 500, 'application/json',
+        JSON::PP->new->utf8->encode({
+          ok       => 0,
+          error    => $e,
+          app      => $app,
+          item_id  => $id,
+          log      => Run::launch_log_path(),
+          log_tail => Run::launch_log_tail(20),
+          message  => "Launch failed: $e",
+        }));
+    }
+    my $code = ($res && $res->{ok}) ? 200 : 500;
+    $res->{log} //= Run::launch_log_path();
+    $res->{log_tail} //= Run::launch_log_tail(20);
+    return _send($c, $code, 'application/json',
       JSON::PP->new->utf8->encode($res));
+  }
+  if ($path eq '/api/launch-log') {
+    my $n = $qp{n} // 40;
+    $n = 40 unless $n =~ /^\d+$/ && $n > 0 && $n <= 200;
+    return _send($c, 200, 'application/json',
+      JSON::PP->new->utf8->encode({
+        path => Run::launch_log_path(),
+        log  => Run::launch_log_tail(0 + $n),
+      }));
   }
   if ($path eq '/stl-viewer') {
     return _send($c, 200, 'text/html; charset=utf-8',
@@ -621,13 +654,13 @@ sub _page_settings {
         <label class="field" for="freecad">freecad</label>
         <input type="text" id="freecad" name="freecad" value="}
           . _esc($disk->{freecad} // $eff->{freecad} // LibConfig::freecad_cmd()) . qq{"/>
-        <div class="hint">FreeCAD launch command. Examples: <code>freecad</code>, <code>ssh -Y tomoon freecad</code>, or with <code>{file}</code> placeholder. Env: THREEDLIB_FREECAD. Path must be reachable on the FreeCAD host (shared NFS, etc.).</div>
+        <div class="hint">FreeCAD launch command (server-side when you click FreeCAD). Prefer permanent DISPLAY on the FreeCAD host, e.g. <code>ssh -n -f tomoon 'export DISPLAY=:10; exec freecad {file}'</code> — no <code>ssh -Y</code> needed if :10 is already forwarded. Env: THREEDLIB_FREECAD. Paths must be NFS-visible on that host. Launches log to <code>/var/log/3dlib.log</code>.</div>
       </div>
       <input type="hidden" name="freecad_shell_present" value="1"/>
       <div class="checks">
         <label><input type="checkbox" name="freecad_shell" value="1"}
           . (_as_bool($disk->{freecad_shell} // $eff->{freecad_shell}, 0) ? ' checked' : '')
-          . qq{/> freecad_shell — run via <code>/bin/sh -c</code> (complex ssh/quoting)</label>
+          . qq{/> freecad_shell — force <code>/bin/sh -c</code> (auto-on for ssh/complex commands if unset)</label>
       </div>
       <div class="row">
         <label class="field" for="image_viewer">image_viewer</label>
@@ -1493,14 +1526,42 @@ document.addEventListener('DOMContentLoaded', () => {
     flash.className = 'banner ' + (isErr ? 'err' : 'ok');
   }
   document.querySelectorAll('a.btn-launch').forEach(a => {
-    a.addEventListener('click', (e) => {
-      // Let the browser hand the URL to the desktop (bambustudio:// / freecad://).
-      // Prevent navigating the page away if the handler consumes it.
+    a.addEventListener('click', async (e) => {
+      e.preventDefault();
       e.stopPropagation();
       const app = a.dataset.app || 'studio';
+      const id = a.dataset.id;
       const label = app === 'freecad' ? 'FreeCAD' : 'Bambu Studio';
-      showFlash('Opening ' + label + ' via system handler…');
-      // Do not preventDefault — href must fire for the scheme handler.
+      const mode = app === 'freecad' ? 'direct' : 'url';
+      showFlash('Launching ' + label + '…');
+      try {
+        const res = await fetch('/open', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: 'id=' + encodeURIComponent(id)
+            + '&app=' + encodeURIComponent(app)
+            + '&mode=' + encodeURIComponent(mode),
+          credentials: 'same-origin',
+        });
+        const text = await res.text();
+        let data = {};
+        try { data = JSON.parse(text); } catch (_) {}
+        if (data.mode === 'url' && data.url) {
+          window.location.href = data.url;
+        }
+        if (!res.ok || data.ok === false) {
+          let msg = label + ' failed: ' + (data.error || data.message || text || res.status);
+          if (data.cmd) msg += ' | ' + data.cmd;
+          if (data.log_tail) msg += ' — ' + String(data.log_tail).slice(-300);
+          showFlash(msg, true);
+          return;
+        }
+        let ok = data.message || (label + ' launched');
+        if (data.cmd) ok += ' — ' + data.cmd;
+        showFlash(ok);
+      } catch (err) {
+        showFlash(label + ' failed: ' + err, true);
+      }
     });
   });
 });
@@ -1578,10 +1639,14 @@ document.addEventListener('DOMContentLoaded', () => {
     flash.className = 'banner ' + (isErr ? 'err' : 'ok');
   }
   document.querySelectorAll('.btn-launch').forEach(btn => {
-    btn.addEventListener('click', async () => {
+    btn.addEventListener('click', async (e) => {
+      // Server-side freecad (ssh/DISPLAY=:10); studio uses desktop scheme unless mode=direct
+      e.preventDefault();
+      e.stopPropagation();
       const app = btn.dataset.app || 'studio';
       const id = btn.dataset.id;
       const label = app === 'freecad' ? 'FreeCAD' : 'Bambu Studio';
+      const mode = app === 'freecad' ? 'direct' : 'url';
       btn.disabled = true;
       const prev = btn.textContent;
       btn.textContent = 'Launching...';
@@ -1589,19 +1654,31 @@ document.addEventListener('DOMContentLoaded', () => {
         const res = await fetch('/open', {
           method: 'POST',
           headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-          body: 'id=' + encodeURIComponent(id) + '&app=' + encodeURIComponent(app),
+          body: 'id=' + encodeURIComponent(id)
+            + '&app=' + encodeURIComponent(app)
+            + '&mode=' + encodeURIComponent(mode),
           credentials: 'same-origin',
         });
         const text = await res.text();
         let data = {};
         try { data = JSON.parse(text); } catch (_) {}
-        if (!res.ok) {
-          showFlash('Failed to launch ' + label + ': ' + (data.error || text || res.status), true);
+        if (data.mode === 'url' && data.url) {
+          window.location.href = data.url;
+        }
+        if (!res.ok || data.ok === false) {
+          let msg = 'Failed to launch ' + label + ': ' + (data.error || data.message || text || res.status);
+          if (data.cmd) msg += ' | cmd: ' + data.cmd;
+          if (data.log) msg += ' | log: ' + data.log;
+          if (data.log_tail) msg += '\\n' + data.log_tail;
+          showFlash(msg, true);
           return;
         }
-        showFlash(data.message || ('Launched ' + label));
-      } catch (e) {
-        showFlash('Failed to launch ' + label + ': ' + e, true);
+        let ok = data.message || ('Launched ' + label);
+        if (data.cmd) ok += ' — ' + data.cmd;
+        if (data.log) ok += ' (log ' + data.log + ')';
+        showFlash(ok);
+      } catch (err) {
+        showFlash('Failed to launch ' + label + ': ' + err, true);
       } finally {
         btn.disabled = false;
         btn.textContent = prev;

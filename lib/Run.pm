@@ -13,6 +13,47 @@ use DB ();
 use LibConfig ();
 use Util qw(dry_print path_ext);
 use Item ();
+use POSIX qw(strftime WNOHANG);
+
+# Launch / open diagnostics (web FreeCAD, CLI run, handlers).
+sub launch_log_path () {
+  return $ENV{THREEDLIB_LOG}
+    // LibConfig::load_config()->{launch_log}
+    // '/var/log/3dlib.log';
+}
+
+sub launch_log {
+  my (@msg) = @_;
+  my $line = join('', @msg);
+  $line =~ s/\n+\z//;
+  my $ts = strftime('%Y-%m-%d %H:%M:%S', localtime);
+  my $out = "[$ts] $line\n";
+  print STDERR $out;
+  my $path = launch_log_path();
+  if (open my $fh, '>>', $path) {
+    print {$fh} $out;
+    close $fh;
+  }
+  elsif (open my $fh2, '>>', '/tmp/3dlib-launch.log') {
+    print {$fh2} $out;
+    close $fh2;
+  }
+  return;
+}
+
+# Last N lines of the launch log (for web UI).
+sub launch_log_tail {
+  my ($n) = @_;
+  $n = 40 unless defined $n && $n > 0;
+  my $path = launch_log_path();
+  $path = '/tmp/3dlib-launch.log' unless -f $path;
+  return '' unless -f $path;
+  open my $fh, '<', $path or return '';
+  my @lines = <$fh>;
+  close $fh;
+  @lines = @lines[ -$n .. $#lines ] if @lines > $n;
+  return join('', @lines);
+}
 
 sub run {
   my (%o) = @_;
@@ -236,9 +277,20 @@ sub _stls_under_dir ($dir) {
   return [ sort @stls ];
 }
 
+# Escape a path for embedding inside a single-quoted shell string.
+sub _shell_escape_sq {
+  my ($s) = @_;
+  $s //= '';
+  $s =~ s/'/'\\''/g;
+  return $s;
+}
+
 # Expand a command template into argv (or shell string).
 # {file} is replaced with the first path; extra paths are appended.
 # $files may be a path string or an arrayref of paths.
+#
+# IMPORTANT: do not use NUL placeholders — Text::ParseWords::shellwords
+# strips NULs and left us launching FreeCAD with a literal "FILE".
 sub expand_cmd {
   my ($spec, $files, %o) = @_;
   $spec //= '';
@@ -250,29 +302,32 @@ sub expand_cmd {
   die "nothing to open\n" unless @files;
   my $file = $files[0];
 
-  if ($o{shell}) {
+  # Auto shell for ssh / complex freecad lines unless caller forced argv mode
+  my $shell = $o{shell};
+  if (!defined $shell) {
+    $shell = ($spec =~ /[|;&<>()\$`\\]|[\n\r]|ssh\s/i) ? 1 : 0;
+  }
+
+  if ($shell) {
     my $s = $spec;
     if ($s =~ /\{file\}/) {
-      my $q = $file;
-      $q =~ s/'/'\\''/g;
-      $s =~ s/\{file\}/'$q'/g;
+      # Insert path only (escaped for single-quoted context). Templates that
+      # already wrap the remote command in '…{file}…' stay valid.
+      my $esc = _shell_escape_sq($file);
+      $s =~ s/\{file\}/$esc/g;
       for my $extra (@files[1 .. $#files]) {
-        my $e = $extra;
-        $e =~ s/'/'\\''/g;
-        $s .= " '$e'";
+        $s .= " '" . _shell_escape_sq($extra) . "'";
       }
     }
     else {
       for my $f (@files) {
-        my $q = $f;
-        $q =~ s/'/'\\''/g;
-        $s .= " '$q'";
+        $s .= " '" . _shell_escape_sq($f) . "'";
       }
     }
     return (shell => 1, cmd => $s);
   }
 
-  my $ph = "\0FILE\0";
+  my $ph = '__3DLIB_FILE__';
   my $tmp = $spec;
   my $had_ph = ($tmp =~ s/\{file\}/$ph/g) ? 1 : 0;
   my @cmd = shellwords($tmp);
@@ -295,8 +350,11 @@ sub _launch_app {
   if ($app eq 'freecad') {
     $label             = 'FreeCAD';
     $spec              = LibConfig::freecad_cmd();
-    $shell             = LibConfig::freecad_shell();
-    $require_local_bin = 0;    # may be "ssh tomoon freecad"
+    # Explicit config wins; otherwise expand_cmd auto-detects ssh/complex lines
+    $shell             = LibConfig::freecad_shell_configured()
+      ? LibConfig::freecad_shell()
+      : undef;
+    $require_local_bin = 0;    # may be "ssh tomoon … DISPLAY=:10 freecad"
     # FreeCAD: single path only
     $arg = $arg->[0] if ref $arg eq 'ARRAY';
   }
@@ -310,21 +368,24 @@ sub _launch_app {
   my %ex = expand_cmd($spec, $arg, shell => $shell);
 
   my $open_disp = ref $arg eq 'ARRAY' ? [ $arg->@* ] : $arg;
+  my $cmd_disp  = $ex{shell} ? $ex{cmd} : join(' ', $ex{cmd}->@*);
 
   if ($dryrun) {
     if ($ex{shell}) {
       dry_print(1, "exec sh -c ", $ex{cmd});
     }
     else {
-      dry_print(1, "exec ", join(' ', $ex{cmd}->@*));
+      dry_print(1, "exec ", $cmd_disp);
     }
+    launch_log("[dryrun] $label item=", ($item_id // '-'), " cmd=$cmd_disp");
     return {
       dryrun  => 1,
       app     => $app,
       label   => $label,
       open    => $open_disp,
       item_id => $item_id,
-      cmd     => $ex{shell} ? $ex{cmd} : join(' ', $ex{cmd}->@*),
+      cmd     => $cmd_disp,
+      log     => launch_log_path(),
     };
   }
 
@@ -334,18 +395,30 @@ sub _launch_app {
       # bare name on PATH is ok
     }
     elsif ($bin && $bin =~ m{/} && !-e $bin) {
+      launch_log("ERROR $label binary missing: $bin");
       die "$label not found: $bin\n";
     }
   }
 
+  my $logf = launch_log_path();
+  launch_log(
+    "launch $label item=", ($item_id // '-'),
+    " open=", (ref $open_disp eq 'ARRAY' ? join(',', @$open_disp) : ($open_disp // '')),
+    " shell=", ($ex{shell} ? 1 : 0),
+    " cmd=$cmd_disp",
+  );
+
   my $pid = fork();
   if (!defined $pid) {
+    launch_log("ERROR fork failed: $!");
     die "fork failed: $!\n";
   }
   if ($pid == 0) {
     open STDIN,  '<',  '/dev/null';
-    open STDOUT, '>>', '/tmp/3dlib-launch.log';
-    open STDERR, '>>', '/tmp/3dlib-launch.log';
+    # Child output goes to the same launch log (and tmp fallback)
+    my $child_log = (-w dirname($logf) || -w $logf) ? $logf : '/tmp/3dlib-launch.log';
+    open STDOUT, '>>', $child_log;
+    open STDERR, '>>', $child_log;
     if ($ex{shell}) {
       exec('/bin/sh', '-c', $ex{cmd}) or exit 127;
     }
@@ -353,8 +426,41 @@ sub _launch_app {
       exec($ex{cmd}->@*) or exit 127;
     }
   }
-  my $cmd_disp = $ex{shell} ? $ex{cmd} : join(' ', $ex{cmd}->@*);
+  # Poll briefly: ssh/config errors often exit within a second; ssh -f may
+  # leave the intermediate shell around longer — still catch fast failures.
+  my $quick_fail;
+  {
+    require Time::HiRes;
+    for (1 .. 10) {
+      Time::HiRes::sleep(0.1);
+      my $reaped = waitpid($pid, WNOHANG);
+      if ($reaped == $pid) {
+        my $code = $? >> 8;
+        $quick_fail = $code;
+        launch_log("ERROR $label exited early pid=$pid status=$code cmd=$cmd_disp");
+        last;
+      }
+    }
+    launch_log("ok $label started pid=$pid") unless defined $quick_fail;
+  }
+
   say "Launched $label (pid $pid): $cmd_disp";
+  my $tail = launch_log_tail(15);
+  if (defined $quick_fail) {
+    return {
+      ok      => 0,
+      error   => "$label exited immediately (status $quick_fail)",
+      app     => $app,
+      label   => $label,
+      pid     => $pid,
+      open    => $open_disp,
+      item_id => $item_id,
+      cmd     => $cmd_disp,
+      log     => $logf,
+      log_tail => $tail,
+      message => "$label failed to stay running (exit $quick_fail). See $logf",
+    };
+  }
   return {
     ok      => 1,
     app     => $app,
@@ -363,7 +469,9 @@ sub _launch_app {
     open    => $open_disp,
     item_id => $item_id,
     cmd     => $cmd_disp,
-    message => "Launched $label",
+    log     => $logf,
+    log_tail => $tail,
+    message => "Launched $label (pid $pid)",
   };
 }
 

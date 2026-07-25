@@ -80,10 +80,10 @@ sub image_viewer () {
 # FreeCAD launch command (default: freecad).
 # Examples:
 #   "freecad"
-#   "ssh -Y tomoon freecad"
-#   "ssh -Y tomoon freecad {file}"
+#   "ssh -n -f tomoon 'export DISPLAY=:10; exec freecad {file}'"   # permanent DISPLAY forward
+#   "ssh -Y tomoon freecad {file}"   # only if you need fresh X11 forward
 # Env: THREEDLIB_FREECAD; config freecad or tools.freecad
-# Set freecad_shell / tools.freecad_shell true for full shell (pipes, complex quoting).
+# freecad_shell: force /bin/sh -c. If unset, auto when command contains ssh / shell metachars.
 sub freecad_cmd () {
   my $cfg = load_config();
   my $tools = (ref $cfg->{tools} eq 'HASH') ? $cfg->{tools} : {};
@@ -94,6 +94,16 @@ sub freecad_cmd () {
     // DEFAULT_FREECAD;
   $v =~ s/^\s+|\s+\z//g if defined $v;
   return (defined $v && length $v) ? $v : DEFAULT_FREECAD;
+}
+
+# True when freecad_shell is explicitly set in env/config (including false).
+sub freecad_shell_configured () {
+  my $cfg = load_config();
+  my $tools = (ref $cfg->{tools} eq 'HASH') ? $cfg->{tools} : {};
+  return 1 if defined $ENV{THREEDLIB_FREECAD_SHELL};
+  return 1 if exists $cfg->{freecad_shell};
+  return 1 if exists $tools->{freecad_shell};
+  return 0;
 }
 
 sub freecad_shell () {
