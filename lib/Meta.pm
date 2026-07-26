@@ -99,13 +99,13 @@ sub extract_3mf_meta {
 
   if ($m{design_model_id} || $m{numeric_id}) {
     $m{source_site} = 'makerworld';
-    $m{source_url}  = makerworld_public_url(
-      numeric_id      => $m{numeric_id},
-      title           => $m{title},
-      design_model_id => $m{design_model_id},
+    # Public page URL only when we have a numeric id. DesignModelId (US…)
+    # is kept for dedupe but is not a valid /en/models/… path.
+    $m{source_url} = makerworld_public_url(
+      numeric_id => $m{numeric_id},
+      title      => $m{title},
     );
-    # Prefer numeric public id for display; keep DesignModelId separately
-    $m{source_id} = $m{numeric_id} // $m{design_model_id};
+    $m{source_id} = $m{numeric_id} if $m{numeric_id};
   }
   return \%m;
 }
@@ -126,18 +126,20 @@ sub title_to_slug ($title) {
 
 # Public model page, e.g. https://makerworld.com/en/models/2755057
 # (slug suffix is optional on MakerWorld; numeric id alone is enough and more stable)
-# DesignModelId-only (US…) is a last-resort fallback.
+# DesignModelId (US…) is an internal key, not a public page id — never invent
+# https://makerworld.com/en/models/USxxxx (those 404).
 sub makerworld_public_url {
   my (%o) = @_;
   my $num = $o{numeric_id};
   return "https://makerworld.com/en/models/${num}" if $num;
-  return unless $o{design_model_id};
-  return 'https://makerworld.com/en/models/' . $o{design_model_id};
+  return;
 }
 
 # Normalize a source URL for catalog storage.
-# - MakerWorld page URLs → stable https://makerworld.com/en/models/<id>
-# - CDN embeds (makerworld.bblmw.com/.../model/DSM… or US…) → public page
+# - MakerWorld page URLs → stable https://makerworld.com/en/models/<numeric-id>
+# - CDN embeds with DSM… → public page (DSM maps to numeric id)
+# - CDN embeds with US… only → keep original CDN URL (cannot invent public page)
+# - Fake public pages /en/models/USxxxx → undef (not a real MakerWorld page)
 # - Other sites left as-is (trimmed, https:// if scheme missing)
 sub canonicalize_source_url {
   my ($url) = @_;
@@ -145,6 +147,11 @@ sub canonicalize_source_url {
   $url =~ s/^\s+|\s+\z//g;
   return unless length $url;
   $url = "https://$url" if $url !~ m{^[a-z][a-z0-9+.-]*:}i;
+
+  # Fake public path built from DesignModelId — drop it
+  if ($url =~ m{makerworld\.com/(?:en|zh)/models/US[A-Za-z0-9]+}i) {
+    return;
+  }
 
   # Already a MakerWorld model page?
   if (my $mw = parse_makerworld_url($url)) {
@@ -158,7 +165,8 @@ sub canonicalize_source_url {
       return makerworld_public_url(numeric_id => $num) if $num;
     }
     if ($url =~ m{/model/(US[A-Za-z0-9]+)}i) {
-      return makerworld_public_url(design_model_id => $1);
+      # No public numeric id — keep the asset URL as-is (do not invent /models/US…)
+      return $url;
     }
     # Bare DSM id anywhere in the URL
     if ($url =~ m{\b(DSM0*\d+)\b}i) {
@@ -284,11 +292,11 @@ sub harvest_project_sources {
     my $t = read_text($f);
     push @urls, harvest_urls_from_text($t) if $t;
   }
-  # Canonicalize + unique preserve order
+  # Canonicalize + unique preserve order (drop invalid /models/US… pages)
   my %seen;
   my @canon;
   for my $u (@urls) {
-    my $c = canonicalize_source_url($u) // $u;
+    my $c = canonicalize_source_url($u);
     next unless defined $c && length $c;
     next if $seen{$c}++;
     push @canon, $c;
@@ -305,33 +313,38 @@ sub harvest_project_sources {
 
 # Merge an explicit --source-url (or handler URL) over harvested sources.
 # Preferential primary; append harvested URLs as extras.
+# Invalid MakerWorld /models/US… URLs are dropped (not a public page).
 sub merge_source_url {
   my ($src, $url) = @_;
   $src = {} unless ref $src eq 'HASH';
   return $src unless defined $url && length $url;
-  my $primary = canonicalize_source_url($url) // $url;
-  $primary =~ s/^\s+|\s+\z//g;
-  return $src unless length $primary;
+  my $primary = canonicalize_source_url($url);
+  $primary =~ s/^\s+|\s+\z//g if defined $primary;
+  return $src unless defined $primary && length $primary;
 
   my @urls = ($primary);
   my %seen = ($primary => 1);
   for my $u (@{ $src->{urls} // [] }) {
     next unless defined $u && length $u;
-    my $c = canonicalize_source_url($u) // $u;
+    my $c = canonicalize_source_url($u);
+    next unless defined $c && length $c;
     next if $seen{$c}++;
     push @urls, $c;
   }
   if ($src->{source_url}) {
-    my $c = canonicalize_source_url($src->{source_url}) // $src->{source_url};
-    unless ($seen{$c}++) {
+    my $c = canonicalize_source_url($src->{source_url});
+    if (defined $c && length $c && !$seen{$c}++) {
       push @urls, $c;
     }
   }
+  my $sid = _id_from_url($primary);
+  # Public MakerWorld id is numeric only
+  $sid = undef if defined $sid && $sid =~ /^US/i;
   return {
     urls         => \@urls,
     source_url   => $primary,
     source_site  => classify_site($primary) // undef,
-    source_id    => (_id_from_url($primary) // undef),
+    source_id    => $sid,
     sources_json => (_json_array(@urls) // undef),
   };
 }
@@ -442,12 +455,13 @@ sub parse_makerworld_url {
     };
   }
   # DesignModelId form (legacy / deep links): /models/USxxxxxxxx
+  # Not a valid public page — expose design_model_id for catalog lookup only.
   if ($url =~ m{makerworld\.com/(?:en|zh)/models/(US[A-Za-z0-9]+)}i) {
     return {
       design_model_id => $1,
-      source_url      => makerworld_public_url(design_model_id => $1),
+      source_url      => undef,
       source_site     => 'makerworld',
-      source_id       => $1,
+      source_id       => undef,
     };
   }
   return;

@@ -435,6 +435,14 @@ sub _normalize_url {
   return unless length $u;
   $u = "https://$u" if $u !~ m{^https?://}i;
   die "edit: invalid URL (need http/https): $u\n" unless $u =~ m{^https?://}i;
+  # Canonicalize MakerWorld CDN → public page; reject /models/US… fakes
+  if (my $c = Meta::canonicalize_source_url($u)) {
+    return $c;
+  }
+  if ($u =~ m{makerworld\.com/(?:en|zh)/models/US[A-Za-z0-9]+}i) {
+    die "edit: MakerWorld DesignModelId is not a public page URL "
+      . "(use numeric https://makerworld.com/en/models/NNNN)\n";
+  }
   return $u;
 }
 

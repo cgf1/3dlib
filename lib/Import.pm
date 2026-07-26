@@ -26,9 +26,16 @@ sub import_path {
   my $clean  = $o{clean} // 0;
   my $root   = library_root();
 
-  # Optional explicit source page URL (e.g. from browser / --source-url)
+  # Optional explicit source page URL (e.g. from browser / --source-url).
+  # Drop fake MakerWorld /models/USxxxx pages (DesignModelId is not a public id).
   if (defined $o{source_url} && length $o{source_url}) {
-    $o{source_url} = Meta::canonicalize_source_url($o{source_url}) // $o{source_url};
+    my $canon = Meta::canonicalize_source_url($o{source_url});
+    if (defined $canon && length $canon) {
+      $o{source_url} = $canon;
+    }
+    else {
+      delete $o{source_url};
+    }
   }
   else {
     delete $o{source_url};
@@ -633,10 +640,22 @@ sub _file_source_meta {
   };
   return Meta::merge_source_url($base, $source_url) if $source_url;
   if ($base->{source_url}) {
-    $base->{source_url} = Meta::canonicalize_source_url($base->{source_url})
-      // $base->{source_url};
-    $base->{source_site} //= Meta::classify_site($base->{source_url});
-    $base->{source_id}   //= Meta::_id_from_url($base->{source_url});
+    my $canon = Meta::canonicalize_source_url($base->{source_url});
+    if (defined $canon && length $canon) {
+      $base->{source_url} = $canon;
+      $base->{source_site} //= Meta::classify_site($base->{source_url});
+      my $sid = Meta::_id_from_url($base->{source_url});
+      $sid = undef if defined $sid && $sid =~ /^US/i;
+      $base->{source_id} //= $sid;
+      $base->{urls} = [ $base->{source_url} ];
+    }
+    else {
+      # Invalid invented public URL (e.g. /models/US…) — keep site/design only
+      delete $base->{source_url};
+      $base->{urls} = [];
+      delete $base->{source_id} if defined $base->{source_id}
+        && $base->{source_id} =~ /^US/i;
+    }
   }
   return $base;
 }

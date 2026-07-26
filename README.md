@@ -89,6 +89,8 @@ man 3dlib
 3dlib import model.zip --source-url \
   'https://makerworld.bblmw.com/makerworld/model/DSM00000002755057/design/x.jpg'
 # stores: https://makerworld.com/en/models/2755057
+# Note: 3MF DesignModelId (US…) is for dedupe only — not a public page id.
+# Without a numeric/DSM id, source_url is left empty (pass --source-url).
 
 # Non-3D zip (no model members) → moved intact to download_dir (default /share/tmp)
 3dlib import random-docs.zip
