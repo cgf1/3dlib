@@ -62,11 +62,11 @@ class Item {
     return $path;
   }
 
-  # Paths to pass to Bambu Studio. Prefer every existing .stl (Studio accepts
-  # multiple positional files). If none, fall back to a single openable path
-  # (3mf / model / etc.).
+  # Paths to pass to Bambu Studio.
+  # Prefer all .3mf if any; else every .stl / .step / .stp (multi-arg open).
+  # If none of those, fall back to a single openable model path.
   method studio_open_paths () {
-    my @stls;
+    my (@threemf, @mesh);
     for my $f ($self->files->@*) {
       my \%file = $f;
       my $p = $file{path} // next;
@@ -77,20 +77,34 @@ class Item {
         require Util;
         $ext = Util::path_ext($p);
       }
-      push @stls, $p if $ext eq 'stl';
+      if ($ext eq '3mf') {
+        push @threemf, $p;
+      }
+      elsif ($ext eq 'stl' || $ext eq 'step' || $ext eq 'stp') {
+        push @mesh, $p;
+      }
     }
-    # Single-file STL catalog entry
-    if (!@stls && $kind eq 'file' && -f $path) {
+    if (!@threemf && !@mesh && $kind eq 'file' && -f $path) {
       require Util;
-      push @stls, $path if Util::path_ext($path) eq 'stl';
+      my $ext = Util::path_ext($path);
+      if ($ext eq '3mf') {
+        push @threemf, $path;
+      }
+      elsif ($ext eq 'stl' || $ext eq 'step' || $ext eq 'stp') {
+        push @mesh, $path;
+      }
     }
-    if (@stls) {
-      # Stable order (catalog relpath order already from item_files)
-      return \@stls;
-    }
+    return \@threemf if @threemf;
+    return \@mesh    if @mesh;
     my $one = $self->openable_path('3mf');
     $one = $self->openable_path unless $one && -e $one;
     return ($one && -e $one) ? [$one] : [];
+  }
+
+  # True if Studio can open something (3mf / stl / step).
+  method studio_openable () {
+    my $paths = $self->studio_open_paths;
+    return $paths && @$paths ? 1 : 0;
   }
 
   method has_thumb () {

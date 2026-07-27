@@ -1044,6 +1044,28 @@ sub _send_download_zip {
   );
 }
 
+# Studio can open 3mf, or any stl/step (projects with only meshes included).
+sub _item_studio_openable {
+  my ($it, $files) = @_;
+  return 0 unless $it && ref $it eq 'HASH';
+  my $type = lc($it->{type} // '');
+  return 1 if $type eq '3mf' || $type eq 'stl' || $type eq 'step';
+  $files //= DB::item_files($it->{id}) if $it->{id};
+  return 0 unless $files;
+  for my $f ($files->@*) {
+    my $ext = lc($f->{ext} // '');
+    $ext =~ s/^\.//;
+    return 1 if $ext eq '3mf' || $ext eq 'stl' || $ext eq 'step' || $ext eq 'stp';
+  }
+  # type mixed / project with models
+  if (($it->{kind} // '') eq 'project' || $type eq 'mixed') {
+    require Item;
+    my $obj = eval { Item::from_row($it) };
+    return $obj->studio_openable if $obj;
+  }
+  return 0;
+}
+
 sub _esc {
   my ($s) = @_;
   $s //= '';
@@ -1416,13 +1438,13 @@ sub _page_home {
       ? qq{<label class="sel" title="Select"><input type="checkbox" class="item-sel" value="$it{id}"/></label>}
       : '';
 
-    my $has_3mf = (($it{type} // '') eq '3mf');
     my $has_fc  = (($it{type} // '') eq 'fcstd');
-    # Projects / mixed: peek is expensive; type badges are enough for gallery
+    # Studio: 3mf, or project/file with stl/step (Run opens all meshes)
+    my $has_studio = _item_studio_openable(\%it);
     my $launch = '';
-    if ($has_3mf) {
+    if ($has_studio) {
       my $u = _esc(Meta::library_open_url(id => $it{id}, app => 'studio'));
-      $launch .= qq{<a class="btn secondary btn-launch" href="$u" data-app="studio" data-id="$it{id}" title="Open in Bambu Studio (desktop handler)">Studio</a>};
+      $launch .= qq{<a class="btn secondary btn-launch" href="$u" data-app="studio" data-id="$it{id}" title="Open in Bambu Studio (3mf or all stl/step)">Studio</a>};
     }
     if ($has_fc) {
       my $u = _esc(Meta::library_open_url(id => $it{id}, app => 'freecad'));
@@ -1594,8 +1616,7 @@ sub _page_item ($id, $role = undef, $role_via = undef, $saved = undef, $flash = 
     $banner = qq{<div class="banner ok" id="item-flash" hidden></div>};
   }
 
-  my $has_3mf = (($it{type} // '') eq '3mf')
-    || grep { my \%f = $_; ($f{ext} // '') eq '3mf' } $files->@*;
+  my $has_studio = _item_studio_openable(\%it, $files);
   my $has_fcstd = (($it{type} // '') eq 'fcstd')
     || grep { my \%f = $_; ($f{ext} // '') eq 'fcstd' || ($f{ext} // '') eq 'f3d' } $files->@*;
 
@@ -1606,7 +1627,7 @@ sub _page_item ($id, $role = undef, $role_via = undef, $saved = undef, $flash = 
   if ($can_edit) {
     $actions .= qq{<a class="btn secondary" href="/item/$id/edit">Edit</a>};
   }
-  if ($has_3mf) {
+  if ($has_studio) {
     my $u = _esc(Meta::library_open_url(id => $id, app => 'studio'));
     $actions .= qq{<a class="btn secondary btn-launch" href="$u" data-app="studio" data-id="$id">Open in Bambu Studio</a>};
   }

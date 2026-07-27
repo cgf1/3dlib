@@ -260,21 +260,22 @@ sub _studio_open_paths ($item) {
   return Item::from_row(\%it)->studio_open_paths;
 }
 
-# Loose directory (not yet preferred over catalog): every .stl under it.
+# Loose directory: every .stl / .step under it (no catalog row yet).
 sub _stls_under_dir ($dir) {
   return unless $dir && -d $dir;
   require File::Find;
-  my @stls;
+  my @mesh;
   File::Find::find({
     wanted => sub {
       return unless -f $_;
-      return unless path_ext($File::Find::name) eq 'stl';
-      push @stls, $File::Find::name;
+      my $ext = path_ext($File::Find::name);
+      return unless $ext eq 'stl' || $ext eq 'step' || $ext eq 'stp';
+      push @mesh, $File::Find::name;
     },
     no_chdir => 1,
   }, $dir);
-  return unless @stls;
-  return [ sort @stls ];
+  return unless @mesh;
+  return [ sort @mesh ];
 }
 
 # Escape a path for embedding inside a single-quoted shell string.
