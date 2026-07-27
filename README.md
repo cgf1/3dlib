@@ -64,6 +64,7 @@ sudo systemctl reload 3dlib
 man 3dlib
 3dlib init
 3dlib import PATH [--dryrun] [--copy|--move] [--clean] [--source-url URL]
+3dlib import --project=NAME PATH [PATH...]   # gather models into one project
 3dlib delete ID|PATH [--dryrun] [--keep-files]
 3dlib edit ID|PATH --url URL [--description TEXT] [--name TEXT] …
 3dlib show ID|PATH          # details + open thumbnail (feh by default)

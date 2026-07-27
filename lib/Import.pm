@@ -20,26 +20,20 @@ use DB ();
 
 sub import_path {
   my (%o) = @_;
+  _normalize_import_opts(\%o);
+
+  # --project=NAME: gather model files from path(s) into one project dir
+  if (defined $o{project} && length $o{project}) {
+    my @paths = @{ $o{paths} // [] };
+    push @paths, $o{path} if defined $o{path} && length $o{path};
+    return import_into_project(%o, paths => \@paths);
+  }
+
   my $path   = $o{path} // die "import_path: path required\n";
   my $dryrun = $o{dryrun} // 0;
   my $copy   = $o{copy} // 0;      # 0 = move (default)
   my $clean  = $o{clean} // 0;
   my $root   = library_root();
-
-  # Optional explicit source page URL (e.g. from browser / --source-url).
-  # Drop fake MakerWorld /models/USxxxx pages (DesignModelId is not a public id).
-  if (defined $o{source_url} && length $o{source_url}) {
-    my $canon = Meta::canonicalize_source_url($o{source_url});
-    if (defined $canon && length $canon) {
-      $o{source_url} = $canon;
-    }
-    else {
-      delete $o{source_url};
-    }
-  }
-  else {
-    delete $o{source_url};
-  }
 
   # Normalize UTF-8 before path ops / DB storage (avoids "æé¾" mojibake)
   $path = text_for_db($path);
@@ -63,6 +57,159 @@ sub import_path {
     return _import_directory($path, %o);
   }
   die "Cannot import: $path\n";
+}
+
+sub _normalize_import_opts {
+  my ($o) = @_;
+  # Optional explicit source page URL (e.g. from browser / --source-url).
+  # Drop fake MakerWorld /models/USxxxx pages (DesignModelId is not a public id).
+  if (defined $o->{source_url} && length $o->{source_url}) {
+    my $canon = Meta::canonicalize_source_url($o->{source_url});
+    if (defined $canon && length $canon) {
+      $o->{source_url} = $canon;
+    }
+    else {
+      delete $o->{source_url};
+    }
+  }
+  else {
+    delete $o->{source_url};
+  }
+}
+
+# Collect model files from PATH(s) into projects/<name>/ (create or append).
+# paths => [file|dir, ...], project => name
+sub import_into_project {
+  my (%o) = @_;
+  _normalize_import_opts(\%o);
+
+  my $proj_name = $o{project} // die "import_into_project: project name required\n";
+  my $dryrun    = $o{dryrun} // 0;
+  my $copy      = $o{copy} // 0;
+  my $root      = library_root();
+
+  my @inputs = @{ $o{paths} // [] };
+  die "import_into_project: no paths\n" unless @inputs;
+
+  my @files = _collect_model_files(@inputs);
+  die "No model files (stl/step/3mf/…) found in: @inputs\n" unless @files;
+
+  my $name_orig = text_for_db($proj_name);
+  my $name_en   = sanitize_filename(translate_name($name_orig));
+  $name_en =~ s/\s+/_/g;
+  $name_en = 'project' unless length $name_en;
+
+  my $dest = "$root/projects/$name_en";
+  my $existed = -d $dest ? 1 : 0;
+  # Do not ensure_unique_path — --project means this name (append if present)
+
+  dry_print($dryrun, "project '$name_en': ",
+    scalar(@files), " file(s) -> $dest",
+    ($existed ? " (append)" : " (new)"));
+
+  if ($dryrun) {
+    for my $f (@files) {
+      dry_print(1, "  ", ($copy ? 'copy' : 'move'), " ", $f, " -> $dest/", basename($f));
+    }
+    return {
+      action  => 'project-gather',
+      dest    => $dest,
+      dryrun  => 1,
+      name    => $name_en,
+      files   => [ map { basename($_) } @files ],
+      source_url => $o{source_url},
+    };
+  }
+
+  make_path($dest);
+  my @moved;
+  for my $f (@files) {
+    my $base = text_for_db(basename($f));
+    # Prefer English basename for on-disk name
+    my ($stem, undef, $ext) = fileparse($base, qr/\.[^.]*/);
+    $ext //= '';
+    $ext =~ s/^\.//;
+    my $disk = sanitize_filename(translate_name($stem));
+    $disk =~ s/\s+/_/g;
+    $disk = 'model' unless length $disk;
+    $disk .= ".$ext" if length $ext;
+    my $target = ensure_unique_path("$dest/$disk");
+    dry_print(0, ($copy ? 'copy' : 'move'), " $f -> $target");
+    $target = safe_rename_or_move(
+      src => $f, dest => $target, copy => $copy, dryrun => 0
+    );
+    push @moved, text_for_db($target);
+  }
+
+  my $harvested = Meta::harvest_project_sources($dest);
+  my $inferred  = $o{source_url}
+    // $harvested->{source_url}
+    // Meta::guess_source_url(names => [ $name_orig, $name_en, @files ]);
+  my $src = $inferred
+    ? Meta::merge_source_url($harvested, $inferred)
+    : $harvested;
+  if ($src->{source_url}) {
+    _write_source_url_file($dest, $src->{source_url}, $src->{urls});
+  }
+
+  my $item_id = _catalog_project($dest, $name_orig, $src);
+  DB::log_import(
+    source  => join(' ', @files),
+    dest    => $dest,
+    action  => ($existed ? 'append-project' : 'gather-project'),
+    item_id => $item_id,
+    detail  => $name_en,
+  );
+
+  try { require Thumbs; Thumbs::ensure_item_thumb($item_id) } catch ($e) { warn "thumb: $e" };
+
+  return {
+    action  => 'project-gather',
+    dest    => $dest,
+    item_id => $item_id,
+    name    => $name_en,
+    files   => [ map { basename($_) } @moved ],
+    source_url => $src->{source_url},
+  };
+}
+
+# Expand files/dirs into a flat list of model file paths (absolute, unique).
+sub _collect_model_files {
+  my (@inputs) = @_;
+  my @files;
+  my %seen;
+  for my $raw (@inputs) {
+    my $path = text_for_db($raw);
+    $path = abs_path($path) // $path;
+    $path = text_for_db($path);
+    die "Not found: $raw\n" unless -e $path;
+    if (-f $path) {
+      my $ext = path_ext($path);
+      if ($ext eq 'zip') {
+        die "Zip not supported with --project (unpack first or import zip alone): $path\n";
+      }
+      unless (LibConfig::is_model_ext($ext)) {
+        die "Not a 3D model file (.$ext): $path\n";
+      }
+      push @files, $path unless $seen{$path}++;
+      next;
+    }
+    if (-d $path) {
+      find({
+        wanted => sub {
+          return unless -f $_;
+          my $p = text_for_db($File::Find::name);
+          my $ext = path_ext($p);
+          return unless LibConfig::is_model_ext($ext);
+          push @files, $p unless $seen{$p}++;
+        },
+        no_chdir => 1,
+      }, $path);
+      next;
+    }
+    die "Cannot import: $path\n";
+  }
+  return @files;
 }
 
 sub _import_directory {

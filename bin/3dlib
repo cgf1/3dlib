@@ -199,17 +199,22 @@ USAGE
 
 sub cmd_import {
   my @args = @_;
-  my ($dryrun, $move, $copy, $clean, $quiet, $source_url);
+  my ($dryrun, $move, $copy, $clean, $quiet, $source_url, $project);
   my $usage = <<'USAGE';
 Usage: 3dlib import PATH [options]
+       3dlib import --project=NAME PATH [PATH...] [options]
 
   Import a model file, project directory, or zip into /share/3d.
   Default is to MOVE the source into the library.
   Prints a detailed summary per item unless --quiet is given.
 
-  Zip handling:
-    - Zip containing 3D models (stl/step/3mf/…) → unpack into projects/,
-      flatten a single top-level folder, catalog, optional URL file.
+  --project=NAME:
+    Collect model files (stl/step/3mf/…) from one or more PATH args into
+    projects/NAME (create or append). Directories are scanned for models.
+    Zips are not supported with --project (import the zip alone, or unpack).
+
+  Zip handling (without --project):
+    - Zip containing 3D models → unpack into projects/, flatten, catalog.
     - Zip with no model files → move intact to download_dir
       (default /share/tmp; config download_dir / THREEDLIB_DOWNLOAD_DIR).
 
@@ -219,6 +224,7 @@ Options:
   --copy                Copy into library; leave source in place
   --dryrun, --dry-run   Describe actions only; do not change files
   --move                Move into library (default)
+  --project=NAME        Gather PATH(s) into projects/NAME
   --source-url URL      Primary page URL for this import (canonicalized
                         for MakerWorld/CDN forms). Sets catalog primary
                         and writes/updates a project URL file.
@@ -228,6 +234,7 @@ Options:
 PATH:
   Single 3D file (.3mf .stl .step .fcstd ...) or a .zip
   Directory: only 3D files / project-like subdirs / zips are imported
+  With --project: one or more files and/or directories
 USAGE
   parse_opts(
     $usage, \@args,
@@ -237,11 +244,13 @@ USAGE
     'clean'          => \$clean,
     'quiet|q'        => \$quiet,
     'source-url=s'   => \$source_url,
+    'project=s'      => \$project,
   );
 
-  my $path = shift @args
-    // die "Error: PATH required.\nTry: 3dlib import --help\n";
-  die "Error: unexpected argument(s): @args\n" if @args;
+  die "Error: PATH required.\nTry: 3dlib import --help\n" unless @args;
+  if (defined $project && !length $project) {
+    die "Error: --project requires a name.\n";
+  }
 
   my $do_copy = 0;
   if (defined $copy && $copy) {
@@ -253,13 +262,25 @@ USAGE
 
   ensure_db();
   my %imp = (
-    path   => $path,
     dryrun => $dryrun ? 1 : 0,
     copy   => $do_copy,
     clean  => $clean ? 1 : 0,
   );
   $imp{source_url} = $source_url if defined $source_url && length $source_url;
-  my $res = Import::import_path(%imp);
+
+  my $res;
+  if (defined $project && length $project) {
+    $imp{project} = $project;
+    $imp{paths}   = [ @args ];
+    $res = Import::import_into_project(%imp);
+  }
+  else {
+    die "Error: unexpected argument(s): @args[1..$#args]\n"
+      . "Use --project=NAME to import multiple paths into one project.\n"
+      if @args > 1;
+    $imp{path} = $args[0];
+    $res = Import::import_path(%imp);
+  }
   _print_results($res, quiet => $quiet ? 1 : 0);
 }
 
