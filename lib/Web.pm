@@ -32,12 +32,26 @@ sub serve {
   # "/usr/bin/perl /usr/local/bin/3dlib serve …" (Linux $0 magic).
   _set_process_title('serve', '--bind', $host, '--port', $port);
 
-  my $d = HTTP::Daemon->new(
-    LocalAddr => $host,
-    LocalPort => $port,
-    ReuseAddr => 1,
-    Listen    => 64,
-  ) or die "Cannot bind $host:$port: $!\n";
+  # Retry bind: OpenRC restart can race (old process still holds the port for
+  # a moment after stop). command_background=true reports start OK before we
+  # bind, so a single failed bind leaves the service "crashed".
+  my $d;
+  my $last_err = $!;
+  for my $try (1 .. 25) {
+    $d = HTTP::Daemon->new(
+      LocalAddr => $host,
+      LocalPort => $port,
+      ReuseAddr => 1,
+      Listen    => 64,
+    );
+    last if $d;
+    $last_err = $!;
+    # Exponential-ish backoff: 0.05s … ~2s total ~5s
+    select undef, undef, undef, ($try < 10 ? 0.05 : 0.2);
+  }
+  unless ($d) {
+    die "Cannot bind $host:$port: $last_err\n";
+  }
 
   say "3dlib web: http://$host:$port/";
   say "Library: ", LibConfig::library_root();
@@ -66,6 +80,10 @@ sub serve {
   say "Ctrl-C to stop; SIGHUP or SIGQUIT (Ctrl-\\) reloads code (re-exec).";
   say "Note: for LAN family use only — do not port-forward to the internet.";
 
+  # Own process group so OpenRC stop (TERM to main pid) can free the port:
+  # request children used to keep the listen FD open → EADDRINUSE on restart.
+  eval { setpgrp(0, 0) };
+
   # Reap children; HTTP::Daemon is single-threaded, so we fork per connection
   # so the browser can load many /thumb/N images in parallel.
   local $SIG{CHLD} = sub {
@@ -75,16 +93,26 @@ sub serve {
   # SIGHUP / SIGQUIT → graceful re-exec (reload Perl code; same PID for OpenRC/systemd)
   my $restart = 0;
   my $restart_sig = '';
+  my $stopping = 0;
   my $request_restart = sub ($name) {
     $restart     = 1;
     $restart_sig = $name;
   };
+  my $request_stop = sub ($name) {
+    $stopping    = 1;
+    $restart_sig = $name;
+  };
   local $SIG{HUP}  = sub { $request_restart->('SIGHUP') };
   local $SIG{QUIT} = sub { $request_restart->('SIGQUIT') };
+  local $SIG{TERM} = sub { $request_stop->('SIGTERM') };
+  local $SIG{INT}  = sub { $request_stop->('SIGINT') };
 
-  while (!$restart) {
+  # Base URL for children after they close the listen socket
+  my $base_url = eval { $d->url } // "http://$host:$port/";
+
+  while (!$restart && !$stopping) {
     my $c = $d->accept;
-    if ($restart) {
+    if ($restart || $stopping) {
       $c->close if $c;
       last;
     }
@@ -98,11 +126,15 @@ sub serve {
     }
     if ($pid == 0) {
       # Child: handle this client only.
-      # Do NOT close $d — HTTP::Daemon::ClientConn calls $daemon->url
-      # (sockhost/sockport) while parsing each request; closing the listen
-      # socket makes those undef and spam warnings.
-      local $SIG{HUP}  = 'DEFAULT';    # only the parent restarts
+      # Close the listen socket so "rc-service stop" frees the port even if
+      # request children are still finishing (they no longer hold the FD).
+      # ClientConn needs daemon->url — install a tiny stub.
+      eval { $d->close };
+      _client_set_daemon_url($c, $base_url);
+      local $SIG{HUP}  = 'DEFAULT';
       local $SIG{QUIT} = 'DEFAULT';
+      local $SIG{TERM} = 'DEFAULT';
+      local $SIG{INT}  = 'DEFAULT';
       DB::reconnect();
       try {
         while (my $r = $c->get_request) {
@@ -126,13 +158,46 @@ sub serve {
     undef $c;
   }
 
+  # Release listen port before exit or re-exec
+  eval { $d->close };
+  undef $d;
+
   if ($restart) {
     say(($restart_sig || 'signal') . ": restarting 3dlib serve...");
-    eval { $d->close };
-    # Drop children still finishing requests (they'll exit on their own)
     my $bin = $o{reexec} // $ENV{THREEDLIB_BIN} // '/usr/local/bin/3dlib';
     my @cmd = ($bin, 'serve', '--bind', $host, '--port', $port);
     exec @cmd or die "exec @cmd failed: $!\n";
+  }
+  say(($restart_sig || 'signal') . ": 3dlib serve stopping");
+}
+
+# HTTP::Daemon::ClientConn calls ${*self}{httpd_daemon}->url. After we close
+# the real listen socket in the child, point it at a stub that only serves url().
+sub _client_set_daemon_url {
+  my ($client, $url) = @_;
+  return unless $client && defined $url;
+  my $stub = bless { _url => $url }, 'ThreeDLib::DaemonURLStub';
+  try {
+    ${*$client}{'httpd_daemon'} = $stub;
+  }
+  catch ($e) {
+    # glob slot layout differs on some HTTP::Daemon versions — best-effort
+  }
+}
+
+{
+  package ThreeDLib::DaemonURLStub;
+  sub url { $_[0]{_url} }
+  sub sockhost {
+    my $u = $_[0]{_url} // '';
+    return $1 if $u =~ m{://\[([^\]]+)\]};
+    return $1 if $u =~ m{://([^:/]+)};
+    return 'localhost';
+  }
+  sub sockport {
+    my $u = $_[0]{_url} // '';
+    return $1 if $u =~ m{:(\d+)(?:/|\z)};
+    return 80;
   }
 }
 
