@@ -222,6 +222,9 @@ sub _handle {
     );
   }
 
+  if ($path eq '/favicon.svg' || $path eq '/logo.svg' || $path eq '/favicon.ico') {
+    return _send_logo($c, $path);
+  }
   if ($path eq '/' || $path eq '') {
     return _send($c, 200, 'text/html; charset=utf-8',
       _page_home(%qp, _role => $role, _role_via => $role_via));
@@ -1175,8 +1178,14 @@ sub _css {
     body { margin:0; font-family: system-ui, sans-serif; background:var(--bg); color:var(--fg); }
     header { padding:1rem 1.5rem; border-bottom:1px solid var(--border); background:#fff; display:flex; gap:1rem; align-items:center; flex-wrap:wrap; }
     header a { color:var(--acc); text-decoration:none; font-weight:600; }
+    header a.brand { display:inline-flex; align-items:center; gap:.55rem; color:var(--fg); font-size:1.15rem; letter-spacing:-.02em; }
+    header a.brand:hover { color:var(--acc); }
+    header a.brand img, header a.brand svg { width:2rem; height:2rem; display:block; flex-shrink:0; }
     header form { margin-left:auto; display:flex; gap:.5rem; }
     header .auth { display:flex; gap:.75rem; align-items:center; font-size:.9rem; }
+    .login-wrap .brand-row { display:flex; align-items:center; gap:.65rem; margin-bottom:.35rem; }
+    .login-wrap .brand-row img { width:2.5rem; height:2.5rem; }
+    .login-wrap .brand-row h1 { margin:0; }
     input, select, button { background:var(--input); color:var(--fg); border:1px solid var(--border); border-radius:6px; padding:.4rem .7rem; }
     input:focus, select:focus { outline:2px solid #93c5fd; border-color:var(--acc); }
     button, .btn { background:var(--acc); color:#fff; border:none; cursor:pointer; text-decoration:none; display:inline-block; border-radius:6px; padding:.45rem .8rem; font-size:.9rem; }
@@ -1280,7 +1289,10 @@ sub _header {
   }
   return qq{
 <header>
-  <a href="/">3dlib</a>
+  <a class="brand" href="/" title="3dlib">
+    <img src="/logo.svg" width="32" height="32" alt=""/>
+    <span>3dlib</span>
+  </a>
   <span class="muted">/share/3d</span>
   $auth
   <form method="get" action="/">
@@ -1299,6 +1311,9 @@ sub _html_wrap {
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>} . _esc($title) . qq{ - 3dlib</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml"/>
+<link rel="apple-touch-icon" href="/logo.svg"/>
+<meta name="theme-color" content="#1d4ed8"/>
 <meta http-equiv="Cache-Control" content="no-store"/>
 <style>} . _css() . qq{</style>
 $extra_head
@@ -1308,6 +1323,30 @@ $extra_head
 </body></html>};
 }
 
+sub _logo_svg_path {
+  return '/usr/local/3dlib/share/web/logo.svg';
+}
+
+sub _send_logo {
+  my ($c, $path) = @_;
+  my $file = _logo_svg_path();
+  unless (-f $file) {
+    return _send($c, 404, 'text/plain', 'logo missing');
+  }
+  open my $fh, '<:raw', $file or return _send($c, 500, 'text/plain', 'logo read error');
+  local $/;
+  my $data = <$fh>;
+  close $fh;
+  # favicon.ico requests still get SVG (modern browsers accept it via redirect-ish type)
+  my $ctype = 'image/svg+xml';
+  my $res = HTTP::Response->new(200);
+  $res->header('Content-Type'   => $ctype);
+  $res->header('Content-Length' => length($data));
+  $res->header('Cache-Control'  => 'public, max-age=86400');
+  $res->content($data);
+  $c->send_response($res);
+}
+
 sub _page_login {
   my ($err) = @_;
   my $err_html = $err
@@ -1315,7 +1354,10 @@ sub _page_login {
     : '';
   my $body = qq{
 <div class="login-wrap">
-  <h1>3dlib</h1>
+  <div class="brand-row">
+    <img src="/logo.svg" width="40" height="40" alt=""/>
+    <h1>3dlib</h1>
+  </div>
   <p class="muted">Enter the family password to browse and download models.</p>
   $err_html
   <form method="post" action="/login">
@@ -1331,6 +1373,8 @@ sub _page_login {
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>Login - 3dlib</title>
+<link rel="icon" href="/favicon.svg" type="image/svg+xml"/>
+<meta name="theme-color" content="#1d4ed8"/>
 <meta http-equiv="Cache-Control" content="no-store"/>
 <style>} . _css() . qq{</style>
 </head><body>
