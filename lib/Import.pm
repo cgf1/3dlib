@@ -402,23 +402,13 @@ sub _import_file {
       existing => 1,
     };
   }
+  # Same MakerWorld DesignModelId can cover many profiles/sizes (e.g. Box Lite
+  # 0.8 3x vs default). Only content hash is a true byte-identical duplicate.
   if ($meta3->{design_model_id}) {
     if (my $ex = DB::find_by_design_id($meta3->{design_model_id})) {
-      dry_print($dryrun, "DUPLICATE DesignModelId -> existing #$ex->{id}");
-      DB::log_import(
-        source => $file, dest => $ex->{path}, action => 'duplicate-design',
-        item_id => $ex->{id}, detail => $meta3->{design_model_id}
-      ) unless $dryrun;
-      if ($clean && !$copy && !$dryrun) {
-        unlink($file) or warn "clean failed: $file: $!\n";
-      }
-      return {
-        action  => 'duplicate',
-        source  => $file,
-        dest    => $ex->{path},
-        item_id => $ex->{id},
-        existing => 1,
-      };
+      dry_print($dryrun,
+        "NOTE same DesignModelId as #$ex->{id} ", ($ex->{name} // $ex->{path} // ''),
+        " — importing as a separate file (different content hash)");
     }
   }
 
