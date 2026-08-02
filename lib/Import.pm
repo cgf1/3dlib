@@ -408,7 +408,7 @@ sub _import_file {
     if (my $ex = DB::find_by_design_id($meta3->{design_model_id})) {
       dry_print($dryrun,
         "NOTE same DesignModelId as #$ex->{id} ", ($ex->{name} // $ex->{path} // ''),
-        " — importing as a separate file (different content hash)");
+        " - importing as a separate file (different content hash)");
     }
   }
 
