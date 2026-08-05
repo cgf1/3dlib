@@ -71,6 +71,18 @@ sub delete_items {
         unlink($thumb) or warn "unlink thumb $thumb: $!\n";
       }
     }
+    # Cached plate previews: .thumbs/<id>/plate_N.png
+    my $plate_dir = thumbs_dir() . "/$it{id}";
+    if (-d $plate_dir) {
+      if ($dryrun) {
+        dry_print(1, "would remove plate cache $plate_dir");
+      }
+      else {
+        require File::Path;
+        File::Path::remove_tree($plate_dir, { error => \my $err });
+        warn "remove plate cache $plate_dir: @$err\n" if $err && @$err;
+      }
+    }
 
     if ($dryrun) {
       dry_print(1, "would remove catalog #$it{id} $it{name} ($it{path})");

@@ -201,6 +201,54 @@ sub extract_3mf_thumb_to {
   return 0;
 }
 
+# Studio/Bambu plate preview PNGs: Metadata/plate_1.png, plate_2.png, …
+# (ignores plate_N_small / plate_no_light_N / top_N).
+# Returns [ { num => 1, member => 'Metadata/plate_1.png', size => N }, … ]
+sub list_3mf_plates {
+  my ($path) = @_;
+  return [] unless defined $path && -f $path && $path =~ /\.3mf$/i;
+  my $zip = Archive::Zip->new();
+  return [] unless $zip->read($path) == AZ_OK;
+  my @plates;
+  for my $m ($zip->members()) {
+    my $name = $m->fileName();
+    next unless $name =~ m{^Metadata/plate_(\d+)\.png$}i;
+    push @plates, {
+      num    => 0 + $1,
+      member => $name,
+      size   => $m->uncompressedSize() // 0,
+    };
+  }
+  @plates = sort { $a->{num} <=> $b->{num} } @plates;
+  return \@plates;
+}
+
+# Extract Metadata/plate_<num>.png from a 3MF into $outfile.
+sub extract_3mf_plate_to {
+  my ($path, $plate_num, $outfile) = @_;
+  return 0 unless defined $path && -f $path && defined $outfile;
+  $plate_num = 0 + ($plate_num // 0);
+  return 0 unless $plate_num >= 1;
+  my $zip = Archive::Zip->new();
+  return 0 unless $zip->read($path) == AZ_OK;
+  my $member = $zip->memberNamed("Metadata/plate_${plate_num}.png");
+  unless ($member) {
+    for my $m ($zip->members()) {
+      if ($m->fileName() =~ m{^Metadata/plate_${plate_num}\.png$}i) {
+        $member = $m;
+        last;
+      }
+    }
+  }
+  return 0 unless $member;
+  require File::Basename;
+  require File::Path;
+  File::Path::make_path(File::Basename::dirname($outfile));
+  return $member->extractToFileNamed($outfile) == AZ_OK
+    && -f $outfile
+    && -s $outfile;
+}
+
 # Decode HTML entities, including double-encoded MakerWorld forms (&amp;#34; → ").
 sub _decode_entities ($s) {
   return '' unless defined $s;

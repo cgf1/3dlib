@@ -241,6 +241,10 @@ sub _handle {
     return _send($c, 200, 'text/html; charset=utf-8',
       _page_item_edit($id, $role, $role_via, $qp{err}));
   }
+  # Plate previews from 3MF Metadata/plate_N.png (before bare /item/N)
+  if ($path =~ m{^/item/(\d+)/plate/(\d+)$}) {
+    return _send_plate($c, $1, $2);
+  }
   if ($path =~ m{^/item/(\d+)$}) {
     return _send($c, 200, 'text/html; charset=utf-8',
       _page_item($1, $role, $role_via, $qp{saved}, $qp{flash}));
@@ -895,6 +899,54 @@ sub _send_thumb {
   unless ($path) {
     return _send($c, 404, 'text/plain', 'no thumb');
   }
+  return _send_png_file($c, $path, $mt);
+}
+
+# Primary .3mf path for an item (single-file item path, else first 3mf in files).
+sub _item_primary_3mf ($item, $files = undef) {
+  return unless $item;
+  if (($item->{path} // '') =~ /\.3mf$/i && -f $item->{path}) {
+    return $item->{path};
+  }
+  $files //= DB::item_files($item->{id});
+  for my $f ($files->@*) {
+    my \%file = $f;
+    next unless ($file{ext} // '') eq '3mf' || ($file{path} // '') =~ /\.3mf$/i;
+    return $file{path} if $file{path} && -f $file{path};
+  }
+  return;
+}
+
+# Cached plate PNG path; extract from 3MF when missing/stale vs source mtime.
+# Returns ($path, $mtime) or empty.
+sub _plate_file ($id, $num, $item = undef) {
+  $num = 0 + ($num // 0);
+  return unless $num >= 1;
+  $item //= DB::get_item($id);
+  return unless $item;
+  my $threemf = _item_primary_3mf($item);
+  return unless $threemf;
+  my $src_mt = (stat($threemf))[9] // 0;
+  my $cache  = LibConfig::thumbs_dir() . "/$id/plate_$num.png";
+  if (!-f $cache || !-s $cache || ((stat($cache))[9] // 0) < $src_mt) {
+    Meta::extract_3mf_plate_to($threemf, $num, $cache) or return;
+  }
+  return unless -f $cache && -s $cache;
+  my $mt = (stat($cache))[9] // time;
+  return ($cache, $mt);
+}
+
+sub _send_plate {
+  my ($c, $id, $num) = @_;
+  my ($path, $mt) = _plate_file($id, $num);
+  unless ($path) {
+    return _send($c, 404, 'text/plain', 'no plate');
+  }
+  return _send_png_file($c, $path, $mt);
+}
+
+sub _send_png_file {
+  my ($c, $path, $mt) = @_;
   open my $fh, '<:raw', $path or die $!;
   local $/;
   my $data = <$fh>;
@@ -908,6 +960,16 @@ sub _send_thumb {
   # Binary body — do not run through encode_utf8
   $res->content($data);
   $c->send_response($res);
+}
+
+# List plate numbers for item detail gallery (empty if none).
+sub _item_plate_nums ($id, $item = undef, $files = undef) {
+  $item //= DB::get_item($id);
+  return () unless $item;
+  my $threemf = _item_primary_3mf($item, $files);
+  return () unless $threemf;
+  my $plates = Meta::list_3mf_plates($threemf);
+  return map { $_->{num} } $plates->@*;
 }
 
 sub _safe_path_under {
@@ -1215,6 +1277,13 @@ sub _css {
     .detail { display:grid; grid-template-columns:280px 1fr; gap:1.5rem; }
     @media (max-width:800px) { .detail { grid-template-columns:1fr; } }
     .detail img.big { width:100%; border-radius:10px; background:var(--panel); border:1px solid var(--border); }
+    .plates { margin-top:.85rem; }
+    .plates h3 { margin:0 0 .45rem; font-size:.85rem; color:var(--muted); font-weight:600; text-transform:uppercase; letter-spacing:.03em; }
+    .plates-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(72px,1fr)); gap:.45rem; }
+    .plates-grid a { display:block; border:1px solid var(--border); border-radius:8px; overflow:hidden; background:var(--panel); text-decoration:none; color:inherit; }
+    .plates-grid a:hover { border-color:var(--accent, #3b82f6); box-shadow:0 0 0 1px var(--accent, #3b82f6); }
+    .plates-grid img { display:block; width:100%; aspect-ratio:1; object-fit:contain; background:#fff; }
+    .plates-grid .plate-lab { display:block; text-align:center; font-size:.72rem; color:var(--muted); padding:.15rem .2rem .3rem; }
     table { width:100%; border-collapse:collapse; }
     td, th { text-align:left; padding:.4rem .5rem; border-bottom:1px solid var(--border); font-size:.9rem; }
     th { color:var(--muted); font-weight:600; }
@@ -1682,6 +1751,30 @@ sub _page_item ($id, $role = undef, $role_via = undef, $saved = undef, $flash = 
     ? qq{<img class="big" src="/thumb/$id?v=$tmt" alt=""/>}
     : qq{<div class="ph" style="aspect-ratio:1;border-radius:10px">No thumbnail</div>};
 
+  # Studio plate previews (Metadata/plate_N.png) under the main thumb
+  my @plate_nums = _item_plate_nums($id, \%it, $files);
+  my $plates_html = '';
+  if (@plate_nums) {
+    my $src_mt = 0;
+    if (my $p3 = _item_primary_3mf(\%it, $files)) {
+      $src_mt = (stat($p3))[9] // 0;
+    }
+    my $cells = '';
+    for my $n (@plate_nums) {
+      my $href = "/item/$id/plate/$n?v=$src_mt";
+      $cells .= qq{<a href="$href" target="_blank" rel="noopener" title="Plate $n">}
+        . qq{<img src="$href" alt="Plate $n" loading="lazy"/>}
+        . qq{<span class="plate-lab">Plate $n</span></a>};
+    }
+    my $count = scalar @plate_nums;
+    $plates_html = qq{
+      <div class="plates">
+        <h3>Plates ($count)</h3>
+        <div class="plates-grid">$cells</div>
+      </div>
+    };
+  }
+
   my $can_dl   = WebAuth::can_download($role);
   my $can_del  = WebAuth::can_delete($role);
   my $can_edit = WebAuth::can_edit($role);
@@ -1832,7 +1925,7 @@ JS
     <p><a href="/">&larr; library</a></p>
     $banner
     <div class="detail">
-      <div>$thumb</div>
+      <div>$thumb$plates_html</div>
       <div>
         <h1>} . _esc($it{name}) . qq{</h1>
         <p>
