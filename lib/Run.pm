@@ -92,8 +92,19 @@ sub run {
       $target = $p->{item_id};
       $no_import = 1;
     }
+    elsif ($p->{file} && $p->{file} =~ m{^https?://}i && $target =~ m{^bambustudio:}i) {
+      # MakerWorld "Open in Bambu Studio": bambustudio://open?file=https://...3mf
+      # Those CDN links are signed / cookie-gated — HTTP::Tiny often gets 400.
+      # Hand the original deep link to Studio; it downloads correctly.
+      dry_print($dryrun, "MakerWorld deep link → Studio (no pre-download)");
+      return _launch_app('studio', $p->{raw} // $target, $dryrun);
+    }
     elsif ($p->{file}) {
       $target = $p->{file};
+    }
+    elsif ($p->{http_url} && $target =~ m{^bambustudio:}i) {
+      dry_print($dryrun, "MakerWorld deep link → Studio (no pre-download)");
+      return _launch_app('studio', $p->{raw} // $target, $dryrun);
     }
     elsif ($p->{http_url}) {
       $target = $p->{http_url};
