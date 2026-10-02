@@ -897,12 +897,22 @@ USAGE
   die "Error: unexpected argument(s): @args\n" if @args;
 
   ensure_db();
-  Run::run(
-    target    => $target,
-    dryrun    => $dryrun ? 1 : 0,
-    no_import => $no_import ? 1 : 0,
-    app       => $app // 'studio',
-  );
+  try {
+    Run::run(
+      target    => $target,
+      dryrun    => $dryrun ? 1 : 0,
+      no_import => $no_import ? 1 : 0,
+      app       => $app // 'studio',
+    );
+  }
+  catch ($e) {
+    # Desktop handlers (Terminal=false) otherwise swallow die() with no UI.
+    my $msg = "$e";
+    $msg =~ s/\s+\z//;
+    Run::user_alert('3dlib run failed', $msg)
+      unless $msg =~ /download failed/i;    # _download_url already alerted
+    die $e;
+  }
 }
 
 sub cmd_serve {

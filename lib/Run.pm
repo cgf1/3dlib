@@ -55,6 +55,58 @@ sub launch_log_tail {
   return join('', @lines);
 }
 
+# Visible failure for desktop handlers (Terminal=false): log + stderr + notify-send.
+# Desktop "Open in Bambu Studio" used to die silently on download 400s.
+sub user_alert {
+  my ($title, $detail, %o) = @_;
+  $title  //= '3dlib';
+  $detail //= '';
+  $detail =~ s/\n+\z//;
+  my $urgency = $o{urgency} // 'critical';
+  my $log_line = "ALERT $title: $detail";
+  $log_line =~ s/\n+/ | /g;
+  launch_log($log_line);
+  warn "$title: $detail\n";
+
+  # notify-send only when a session bus / display is available
+  my $display = $ENV{DISPLAY} // $ENV{WAYLAND_DISPLAY} // '';
+  if (length $display && -x '/usr/bin/notify-send') {
+    my $body = $detail;
+    # Keep notification readable
+    if (length $body > 400) {
+      $body = substr($body, 0, 380) . '…';
+    }
+    my @cmd = (
+      '/usr/bin/notify-send',
+      '--app-name=3dlib',
+      "--urgency=$urgency",
+      '--expire-time=20000',
+      '--icon=dialog-error',
+      $title,
+      $body,
+    );
+    # Don't let notify failure mask the real error
+    eval {
+      require POSIX;
+      my $pid = fork();
+      if (defined $pid && $pid == 0) {
+        open STDIN,  '<',  '/dev/null';
+        open STDOUT, '>>', '/dev/null';
+        open STDERR, '>>', '/dev/null';
+        exec @cmd or exit 127;
+      }
+      1;
+    };
+  }
+  return;
+}
+
+sub _short_url ($url) {
+  return '' unless defined $url;
+  return $url if length $url <= 120;
+  return substr($url, 0, 90) . '…' . substr($url, -20);
+}
+
 sub run {
   my (%o) = @_;
   my $target    = $o{target} // die "run: target required\n";
@@ -159,8 +211,13 @@ sub run {
           return { dryrun => 1, url => $mw->{source_url} };
         }
         else {
-          warn "Could not download model automatically; launching Studio with URL.\n";
-          warn "After Studio saves/opens the file, run: 3dlib scan\n";
+          user_alert(
+            '3dlib: MakerWorld download failed',
+            "Could not download model; launching Studio with the page URL instead.\n"
+              . "After Studio opens/saves the file, run: 3dlib scan\n"
+              . _short_url($target),
+            urgency => 'normal',
+          );
           return _launch_app('studio', $target, $dryrun);
         }
       }
@@ -532,9 +589,21 @@ sub _download_url {
     dry_print(1, "would download $url");
     return '/tmp/dryrun-download';
   }
+  launch_log("download GET ", _short_url($url));
   my $http = HTTP::Tiny->new(agent => '3dlib/1.0', timeout => 120, max_redirect => 5);
   my $res  = $http->get($url);
-  die "Download failed: $url ($res->{status})\n" unless $res->{success};
+  unless ($res->{success}) {
+    my $status = $res->{status} // '?';
+    my $reason = $res->{reason} // '';
+    my $hint   = '';
+    if ($status =~ /^(400|401|403)$/ && $url =~ /bblmw\.com|makerworld/i) {
+      $hint = "\n(MakerWorld CDN links are often signed — prefer "
+        . "bambustudio:// deep links so Studio downloads them.)";
+    }
+    my $msg = "HTTP $status $reason\n" . _short_url($url) . $hint;
+    user_alert('3dlib: download failed', $msg);
+    die "Download failed: $url ($status $reason)\n";
+  }
   my $name = basename($url);
   $name =~ s/\?.*//;
   $name = 'download.3mf' unless $name =~ /\./;
@@ -544,6 +613,8 @@ sub _download_url {
   open my $fh, '>:raw', $out or die $!;
   print {$fh} $res->{content};
   close $fh;
+  launch_log("download ok ", length($res->{content} // ''), " bytes → $out");
+  say "Downloaded $out (", length($res->{content} // ''), " bytes)";
   return $out;
 }
 
