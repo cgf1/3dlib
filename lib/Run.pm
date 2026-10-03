@@ -68,24 +68,14 @@ sub user_alert {
   launch_log($log_line);
   warn "$title: $detail\n";
 
-  # notify-send only when a session bus / display is available
+  # Desktop breadcrumb: notify-send, then zenity (notify-send is flaky here)
   my $display = $ENV{DISPLAY} // $ENV{WAYLAND_DISPLAY} // '';
-  if (length $display && -x '/usr/bin/notify-send') {
+  if (length $display) {
     my $body = $detail;
-    # Keep notification readable
     if (length $body > 400) {
       $body = substr($body, 0, 380) . '…';
     }
-    my @cmd = (
-      '/usr/bin/notify-send',
-      '--app-name=3dlib',
-      "--urgency=$urgency",
-      '--expire-time=20000',
-      '--icon=dialog-error',
-      $title,
-      $body,
-    );
-    # Don't let notify failure mask the real error
+    my $icon = ($urgency eq 'critical') ? 'dialog-error' : 'dialog-information';
     eval {
       require POSIX;
       my $pid = fork();
@@ -93,7 +83,19 @@ sub user_alert {
         open STDIN,  '<',  '/dev/null';
         open STDOUT, '>>', '/dev/null';
         open STDERR, '>>', '/dev/null';
-        exec @cmd or exit 127;
+        if (-x '/usr/bin/notify-send') {
+          exec '/usr/bin/notify-send',
+            '--app-name=3dlib', "--urgency=$urgency",
+            '--expire-time=20000', "--icon=$icon",
+            $title, $body
+            and exit 0;
+        }
+        if (-x '/usr/bin/zenity') {
+          exec '/usr/bin/zenity', '--notification',
+            "--text=$title — $body"
+            and exit 0;
+        }
+        exit 127;
       }
       1;
     };
@@ -149,6 +151,11 @@ sub run {
       # Those CDN links are signed / cookie-gated — HTTP::Tiny often gets 400.
       # Hand the original deep link to Studio; it downloads correctly.
       dry_print($dryrun, "MakerWorld deep link → Studio (no pre-download)");
+      user_alert(
+        '3dlib',
+        'Starting Bambu Studio (may close the running copy first)…',
+        urgency => 'normal',
+      ) unless $dryrun;
       return _launch_app('studio', $p->{raw} // $target, $dryrun);
     }
     elsif ($p->{file}) {
